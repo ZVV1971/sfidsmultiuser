@@ -12,6 +12,7 @@ using KeePassLib.Keys;
 using KeePassLib.Serialization;
 using KeePassLib.Collections;
 using System.Xml.Linq;
+using System.Xml;
 
 namespace testconsole
 {
@@ -136,6 +137,7 @@ namespace testconsole
                                   </env:Body>
                                </env:Envelope>
                 ");
+            XmlDocument xmlD = DocumentExtensions.ToXmlDocument(xml);
             return new Dictionary<string, string>();
         }
     }

@@ -3,6 +3,11 @@ using System.Threading;
 using System.IO;
 using System.Text;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Security.AccessControl;
+using System;
+using System.Xml.Linq;
+using System.Xml;
 
 namespace PS_Ids_Async
 {
@@ -43,14 +48,15 @@ namespace PS_Ids_Async
             memMappedOffsetFile = MemoryMappedFile.CreateOrOpen(memMappedOffsetFileName, memMappedFileSize);
             memMappedFileOffsetAccessor = memMappedOffsetFile.CreateViewAccessor();
 
-            if (File.Exists(FileToOpen))
+            CurrentUserSecurity curUS = new CurrentUserSecurity();
+            if (File.Exists(FileToOpen) && curUS.HasAccess(new FileInfo(FileToOpen), FileSystemRights.ReadData & FileSystemRights.Write))
             {
                 fLength = (new FileInfo(FileToOpen)).Length;
                 try
                 {
                     memMappedFile = MemoryMappedFile.CreateFromFile(FileToOpen, FileMode.Open, memName);
                 }
-                catch
+                catch (Exception ex)
                 {
                     memMappedFile = MemoryMappedFile.OpenExisting(memName);
                 }
@@ -117,6 +123,111 @@ namespace PS_Ids_Async
         internal unsafe class SFIDclass
         {
             public SFID sfid;
+        }
+    }
+
+    public class CurrentUserSecurity
+    {
+        WindowsIdentity _currentUser;
+        WindowsPrincipal _currentPrincipal;
+
+        public CurrentUserSecurity()
+        {
+            _currentUser = WindowsIdentity.GetCurrent();
+            _currentPrincipal = new WindowsPrincipal(_currentUser);
+        }
+
+        public bool HasAccess(DirectoryInfo directory, FileSystemRights right)
+        {
+            // Get the collection of authorization rules that apply to the directory.
+            AuthorizationRuleCollection acl = directory.GetAccessControl()
+                .GetAccessRules(true, true, typeof(SecurityIdentifier));
+            return HasFileOrDirectoryAccess(right, acl);
+        }
+
+        public bool HasAccess(FileInfo file, FileSystemRights right)
+        {
+            // Get the collection of authorization rules that apply to the file.
+            AuthorizationRuleCollection acl = file.GetAccessControl()
+                .GetAccessRules(true, true, typeof(SecurityIdentifier));
+            return HasFileOrDirectoryAccess(right, acl);
+        }
+
+        private bool HasFileOrDirectoryAccess(FileSystemRights right,
+                                              AuthorizationRuleCollection acl)
+        {
+            bool allow = false;
+            bool inheritedAllow = false;
+            bool inheritedDeny = false;
+
+            for (int i = 0; i < acl.Count; i++)
+            {
+                var currentRule = (FileSystemAccessRule)acl[i];
+                // If the current rule applies to the current user.
+                if (_currentUser.User.Equals(currentRule.IdentityReference) ||
+                    _currentPrincipal.IsInRole(
+                                    (SecurityIdentifier)currentRule.IdentityReference))
+                {
+
+                    if (currentRule.AccessControlType.Equals(AccessControlType.Deny))
+                    {
+                        if ((currentRule.FileSystemRights & right) == right)
+                        {
+                            if (currentRule.IsInherited)
+                            {
+                                inheritedDeny = true;
+                            }
+                            else
+                            { // Non inherited "deny" takes overall precedence.
+                                return false;
+                            }
+                        }
+                    }
+                    else if (currentRule.AccessControlType
+                                                    .Equals(AccessControlType.Allow))
+                    {
+                        if ((currentRule.FileSystemRights & right) == right)
+                        {
+                            if (currentRule.IsInherited)
+                            {
+                                inheritedAllow = true;
+                            }
+                            else
+                            {
+                                allow = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (allow)
+            { // Non inherited "allow" takes precedence over inherited rules.
+                return true;
+            }
+            return inheritedAllow && !inheritedDeny;
+        }
+    }
+
+    public static class DocumentExtensions
+    {
+        public static XmlDocument ToXmlDocument(this XDocument xDocument)
+        {
+            var xmlDocument = new XmlDocument();
+            using (var xmlReader = xDocument.CreateReader())
+            {
+                xmlDocument.Load(xmlReader);
+            }
+            return xmlDocument;
+        }
+
+        public static XDocument ToXDocument(this XmlDocument xmlDocument)
+        {
+            using (var nodeReader = new XmlNodeReader(xmlDocument))
+            {
+                nodeReader.MoveToContent();
+                return XDocument.Load(nodeReader);
+            }
         }
     }
 }
