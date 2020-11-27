@@ -22,19 +22,33 @@ namespace testconsole
     class Program
     {
         private static readonly string memMappedFileName = @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\sfids.csv";
-        private static readonly string pathToKeePassDb = @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\LINX_GERMANY.kdbx";
-        private static readonly string groupName = "EPAM";
-        private static readonly string entryName = "EPAM";
-        private static string domainName = "novartis-dev-ed.my";
+        private static string pathToKeePassDb = @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\LINX_GERMANY.kdbx";
+        private static string groupName = "EPAM";
+        private static string entryName = "EPAM";
+        private static string domainName;
         private static HttpClient client = new HttpClient();
 
         static async Task Main(string[] args)
         {
+
             var result = Parser.Default.ParseArguments<Options>(args)
-                .WithNotParsed(options => 
-                { 
-                    Console.ReadKey(); Environment.Exit(-1); 
+                .MapResult(
+                (Options opt) => {
+                    domainName = opt.SalesForceDomain;
+                    groupName = opt.GroupName;
+                    entryName = opt.EntryName;
+                    pathToKeePassDb = opt.KDBXPath;
+                    return 1;
+                }, 
+                (IEnumerable<Error> errs) => 
+                {
+                    Console.WriteLine("Press any key to exit...");
+                    Console.ReadKey();
+                    Environment.Exit(-1);
+                    return 0;
                 });
+
+            //domainName = result.
             SecureString securePwd = new SecureString();
             ConsoleKeyInfo key;
 
@@ -58,6 +72,12 @@ namespace testconsole
 
             Dictionary<string, ProtectedString> dic = OpenKeePassDB(securePwd);
             Dictionary<string,string> salesForceSID = await GetSalesForceSessionId(dic);
+            if (salesForceSID.Count == 0)
+            {
+                Console.WriteLine("Error getting SalesForce session ID. Exiting...");
+                Console.ReadKey();
+                return;
+            }
 
             Task[] tasks = new Task[2];
             tasks[0] = Task.Factory.StartNew(()=>dowork(memMappedFileName, "1"));
@@ -90,7 +110,7 @@ namespace testconsole
             mioInfo.Path = pathToKeePassDb;
             CompositeKey compositeKey = new CompositeKey();
             compositeKey.AddUserKey(new KcpPassword(Marshal.PtrToStringAuto(Marshal.SecureStringToBSTR(Password))));
-            IStatusLogger statusLogger = new KeePassLib.Interfaces.NullStatusLogger();
+            IStatusLogger statusLogger = new NullStatusLogger();
 
             Dictionary<string, ProtectedString> dict = new Dictionary<string, ProtectedString>();
 
@@ -209,7 +229,24 @@ namespace testconsole
     class Options
     //https://github.com/gsscoder/commandline/wiki/Latest-Version
     {
-        [Option(Required = true)]
+        [Option('d', "salesforcedomain",
+            Default = "test", 
+            HelpText = "Represents a domain used to log into SalesForce from, e.g. https://test.salesforce.com", 
+            MetaValue ="test")]
         public string SalesForceDomain { get; set; }
+
+        [Option('g', "groupname", Required =true
+            ,HelpText ="Name of the group in the KeePass file where to look for the entry")]
+        public string GroupName { get; set; }
+
+        [Option('e', "entryname", Required = true,
+            HelpText ="Name of the Entry within the group in the KeePass file with necessary credentials")]
+        public string EntryName { get; set; }
+
+        [Option('k', "kdbxpath", Required = true,
+            HelpText ="Path to the KeePass file with the credentials. The file must not be key-file protected!")]
+        public string KDBXPath { get; set; }
+
+        public string GetUsage() { return ""; }
     }
 }
