@@ -1,26 +1,27 @@
-﻿using System.IO.MemoryMappedFiles;
-using System.Threading;
+﻿using System;
 using System.IO;
-using System.Text;
+using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Xml;
+using System.Xml.Linq;
 
 namespace PS_Ids_Async
 {
     public class PowerShellId
     {
-        private static readonly string memMappedFileName = @"d:\Projects\Chinese Data Generation\sfidsmultiuser\sfids.csv";//@"Local\PS_Ids";
-
-        private static readonly MemoryMappedFile memMappedFile;
+        private static MemoryMappedFile memMappedFile;
 
         private static readonly string memMappedOffsetFileName = @"Local\PS_Ids";
 
         private static readonly long memMappedFileSize = 32;
 
-        private static readonly MemoryMappedFile memMappedOffsetFile;
+        private static MemoryMappedFile memMappedOffsetFile;
 
-        private static readonly MemoryMappedViewAccessor memMappedFileOffsetAccessor;
+        private static MemoryMappedViewAccessor memMappedFileOffsetAccessor;
 
-        private static readonly MemoryMappedViewAccessor memMappedFileAccessor;
+        private static MemoryMappedViewAccessor memMappedFileAccessor;
 
         private static readonly string memMutexName = "EPAM_NOVARTIS_SalesForce_IDs_Multiuser_Mutex";
 
@@ -33,25 +34,33 @@ namespace PS_Ids_Async
         private static long fLength;
 
         private static string memName = "mappedName";
-                
-        static PowerShellId()
+
+        private static PowerShellId _temp;
+        
+        private PowerShellId() {}
+
+        public static PowerShellId Create(string FileToOpen)
         {
+            _temp = new PowerShellId();
+            
             memMappedOffsetFile = MemoryMappedFile.CreateOrOpen(memMappedOffsetFileName, memMappedFileSize);
             memMappedFileOffsetAccessor = memMappedOffsetFile.CreateViewAccessor();
 
-            if (File.Exists(memMappedFileName))
+            if (File.Exists(FileToOpen))
             {
-                fLength = (new FileInfo(memMappedFileName)).Length;
+                fLength = (new FileInfo(FileToOpen)).Length;
                 try
                 {
-                    memMappedFile = MemoryMappedFile.CreateFromFile(memMappedFileName, FileMode.Open, memName);
+                    memMappedFile = MemoryMappedFile.CreateFromFile(FileToOpen, FileMode.Open, memName);
                 }
-                catch
+                catch (Exception ex)
                 {
                     memMappedFile = MemoryMappedFile.OpenExisting(memName);
                 }
                 memMappedFileAccessor = memMappedFile.CreateViewAccessor(offset, fLength);
             }
+
+            return _temp;
         }
 
         ~PowerShellId()
@@ -111,6 +120,28 @@ namespace PS_Ids_Async
         internal unsafe class SFIDclass
         {
             public SFID sfid;
+        }
+    }
+
+    public static class DocumentExtensions
+    {
+        public static XmlDocument ToXmlDocument(this XDocument xDocument)
+        {
+            var xmlDocument = new XmlDocument();
+            using (var xmlReader = xDocument.CreateReader())
+            {
+                xmlDocument.Load(xmlReader);
+            }
+            return xmlDocument;
+        }
+
+        public static XDocument ToXDocument(this XmlDocument xmlDocument)
+        {
+            using (var nodeReader = new XmlNodeReader(xmlDocument))
+            {
+                nodeReader.MoveToContent();
+                return XDocument.Load(nodeReader);
+            }
         }
     }
 }
