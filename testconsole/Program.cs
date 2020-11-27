@@ -1,17 +1,20 @@
-﻿using PS_Ids_Async;
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Security;
-using System.Runtime.InteropServices;
-using System.Collections.Generic;
-using KeePassLib.Security;
+﻿using CommandLine;
 using KeePassLib;
+using KeePassLib.Collections;
 using KeePassLib.Interfaces;
 using KeePassLib.Keys;
+using KeePassLib.Security;
 using KeePassLib.Serialization;
-using KeePassLib.Collections;
-using System.Xml.Linq;
+using PS_Ids_Async;
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Http;
+using System.Runtime.InteropServices;
+using System.Security;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Xml;
 
 namespace testconsole
@@ -20,15 +23,21 @@ namespace testconsole
     {
         private static readonly string memMappedFileName = @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\sfids.csv";
         private static readonly string pathToKeePassDb = @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\LINX_GERMANY.kdbx";
-        private static readonly string groupName = "HARMONYLACAN";
-        private static readonly string entryName = "HARMONYLACAN";
+        private static readonly string groupName = "EPAM";
+        private static readonly string entryName = "EPAM";
+        private static string domainName = "novartis-dev-ed.my";
+        private static HttpClient client = new HttpClient();
 
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
+            var result = Parser.Default.ParseArguments<Options>(args)
+                .WithNotParsed(options => 
+                { 
+                    Console.ReadKey(); Environment.Exit(-1); 
+                });
             SecureString securePwd = new SecureString();
             ConsoleKeyInfo key;
 
-            var d = GetSalesForceSessionId();
             Console.Write("Enter password for KeePass: ");
             do
             {
@@ -47,9 +56,8 @@ namespace testconsole
                 // Exit if Enter key is pressed.
             } while (key.Key != ConsoleKey.Enter);
 
-            //Console.WriteLine(Marshal.PtrToStringAuto(Marshal.SecureStringToBSTR(securePwd)));
-
             Dictionary<string, ProtectedString> dic = OpenKeePassDB(securePwd);
+            Dictionary<string,string> salesForceSID = await GetSalesForceSessionId(dic);
 
             Task[] tasks = new Task[2];
             tasks[0] = Task.Factory.StartNew(()=>dowork(memMappedFileName, "1"));
@@ -123,9 +131,9 @@ namespace testconsole
             return dict;
         }
     
-        static Dictionary<string, string> GetSalesForceSessionId()
+        static async Task<Dictionary<string, string>> GetSalesForceSessionId(Dictionary<string, ProtectedString> creds)
         {
-            XDocument xml = XDocument.Parse( @"<?xml version=""1.0"" encoding=""utf-8""?>
+            string xmlString = @"<?xml version=""1.0"" encoding=""utf-8""?>
                   <env:Envelope xmlns:xsd=""http://www.w3.org/2001/XMLSchema""
                               xmlns:xsi=""http://www.w3.org/2001/XMLSchema-instance""
                               xmlns:env=""http://schemas.xmlsoap.org/soap/envelope/"">
@@ -136,9 +144,72 @@ namespace testconsole
                                  </n1:login>
                                   </env:Body>
                                </env:Envelope>
-                ");
-            XmlDocument xmlD = DocumentExtensions.ToXmlDocument(xml);
-            return new Dictionary<string, string>();
+                ";
+            XmlDocument x = new XmlDocument();
+            x.LoadXml(xmlString);
+            //Root.Envelope.Body.login
+            foreach ( XmlElement n in x.ChildNodes[1].ChildNodes[0].ChildNodes[0].ChildNodes) 
+            {
+                switch (n.LocalName)
+                {
+                    case "username":
+                        n.FirstChild.InnerText = creds["UserName"].ReadString();
+                        break;
+                    case "password":
+                        n.FirstChild.InnerText = creds["Password"].ReadString() + creds["SecurityToken"].ReadString();
+                        break;
+                }
+            }
+
+            var httpRequestMessage = new HttpRequestMessage
+            {
+                Method = HttpMethod.Post,
+                RequestUri = new Uri("https://" + domainName + ".salesforce.com/services/Soap/u/45.0"),
+                Headers = {
+                    { HttpRequestHeader.Accept.ToString(), "application/json" },
+                    { "SOAPAction", "login" }
+                },
+                Content = new StringContent(x.OuterXml, Encoding.UTF8, "text/xml")
+            };
+
+            try
+            {
+                HttpResponseMessage msg = await client.SendAsync(httpRequestMessage);
+                if (msg.IsSuccessStatusCode) 
+                { 
+                    x.LoadXml(msg.Content.ReadAsStringAsync().Result); 
+                }
+                else return new Dictionary<string, string>();
+            }
+            catch
+            {
+                return new Dictionary<string, string>();
+            }
+
+            Dictionary<string, string>  dict = new Dictionary<string, string>();
+
+            foreach (XmlElement n in x.ChildNodes[1].ChildNodes[0].ChildNodes[0].ChildNodes[0].ChildNodes)
+            {
+                switch (n.LocalName)
+                {
+                    case "serverUrl":
+                        dict.Add("serverUrl",
+                            //substitute Soap/u with data/v45
+                            Regex.Replace(n.FirstChild.InnerText.Substring(0, n.FirstChild.InnerText.LastIndexOf('/')), @"(Soap/u/)([\d\.]+)", "data/v$2"));
+                        break;
+                    case "sessionId":
+                        dict.Add("sessionId",n.FirstChild.InnerText);
+                        break;
+                }
+            }
+            return dict;
         }
+    }
+
+    class Options
+    //https://github.com/gsscoder/commandline/wiki/Latest-Version
+    {
+        [Option(Required = true)]
+        public string SalesForceDomain { get; set; }
     }
 }
