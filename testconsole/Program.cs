@@ -1,4 +1,5 @@
 ﻿using CommandLine;
+using CommandLine.Text;
 using KeePassLib;
 using KeePassLib.Collections;
 using KeePassLib.Interfaces;
@@ -14,8 +15,10 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
+using Newtonsoft.Json.Linq;
 
 namespace testconsole
 {
@@ -26,6 +29,8 @@ namespace testconsole
         private static string groupName = "EPAM";
         private static string entryName = "EPAM";
         private static string domainName;
+        private static string objectWithAttachments;
+        private static int numberOfTHreads = 5;
         private static HttpClient client = new HttpClient();
 
         static async Task Main(string[] args)
@@ -33,14 +38,16 @@ namespace testconsole
 
             var result = Parser.Default.ParseArguments<Options>(args)
                 .MapResult(
-                (Options opt) => {
+                (Options opt) =>
+                {
                     domainName = opt.SalesForceDomain;
                     groupName = opt.GroupName;
                     entryName = opt.EntryName;
                     pathToKeePassDb = opt.KDBXPath;
+                    objectWithAttachments = Enum.GetName(typeof(SFObjectsWithAttachments), opt.SFObject);
                     return 1;
-                }, 
-                (IEnumerable<Error> errs) => 
+                },
+                (IEnumerable<Error> errs) =>
                 {
                     Console.WriteLine("Press any key to exit...");
                     Console.ReadKey();
@@ -70,8 +77,8 @@ namespace testconsole
                 // Exit if Enter key is pressed.
             } while (key.Key != ConsoleKey.Enter);
 
-            Dictionary<string, ProtectedString> dic = OpenKeePassDB(securePwd);
-            Dictionary<string,string> salesForceSID = await GetSalesForceSessionId(dic);
+            Dictionary<string, ProtectedString> dic = new Dictionary<string, ProtectedString>(OpenKeePassDB(securePwd));
+            Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(dic));
             if (salesForceSID.Count == 0)
             {
                 Console.WriteLine("Error getting SalesForce session ID. Exiting...");
@@ -79,31 +86,79 @@ namespace testconsole
                 return;
             }
 
-            Task[] tasks = new Task[2];
-            tasks[0] = Task.Factory.StartNew(()=>dowork(memMappedFileName, "1"));
-            tasks[1] = Task.Factory.StartNew(()=>dowork(memMappedFileName, "2"));
+            var l = await GetListOfIds(salesForceSID, objectWithAttachments);
+
+            Task[] tasks = new Task[numberOfTHreads];
+            for (int i = 0; i < numberOfTHreads; i++)
+            {
+                tasks[i] = Task.Factory.StartNew(() => doWork(memMappedFileName, i.ToString()));
+            }
             Task.WaitAll(tasks);
             Console.WriteLine("All threads complete");
             Console.ReadKey();
         }
 
-        static void dowork(string FileToOpen, string Id)
+        static async Task<IEnumerable<string>> GetListOfIds(IDictionary<string, string> dic, string obj)
+        {
+            HttpResponseMessage listOfIds = new HttpResponseMessage();
+            List<string> lst = new List<string>();
+            HttpRequestMessage msg = new HttpRequestMessage
+            {
+                Method = HttpMethod.Get,
+                RequestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj),
+                Headers = {
+                    { HttpRequestHeader.Accept.ToString(), "application/json" },
+                    { "Authorization", "Bearer " + dic["sessionId"] }
+                            }
+            };
+            
+            while (true)
+            {
+                try
+                {
+                    listOfIds = await client.SendAsync(msg);
+                }
+                catch
+                {
+                    break;
+                }
+
+                if (listOfIds.StatusCode != HttpStatusCode.OK) break;
+
+                var j = JObject.Parse(await listOfIds.Content.ReadAsStringAsync());
+                foreach (var v in j["records"])
+                {
+                    lst.Add(v["Id"].ToString());
+                }
+
+                if (j["nextRecordsUrl"] != null)
+                {
+                    msg.RequestUri = new Uri(j["nextRecordsUrl"].ToString());
+                }
+                else break;
+            }
+            return lst;
+        }
+
+        static void doWork(string FileToOpen, string Id)
         {
             PS_Ids_Async.PowerShellId psid = PowerShellId.Create(FileToOpen);
             string c;
+            string id = Id;
             do
             {
                 c = psid.GetCurrentID();
                 if (!c.Equals(string.Empty))
                 {
-                    Console.WriteLine($"Input from {Id} value {c}");
+                    Console.WriteLine($"Input from {id} value {c}");
+                    Thread.Sleep(500);
                     continue;
                 }
                 break;
             } while (true);
         }
     
-        static Dictionary<string, ProtectedString> OpenKeePassDB (SecureString Password)
+        static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password)
         {
             PwDatabase PwDB = new PwDatabase();
             IOConnectionInfo mioInfo = new IOConnectionInfo();
@@ -151,7 +206,7 @@ namespace testconsole
             return dict;
         }
     
-        static async Task<Dictionary<string, string>> GetSalesForceSessionId(Dictionary<string, ProtectedString> creds)
+        static async Task<IDictionary<string, string>> GetSalesForceSessionId(IDictionary<string, ProtectedString> creds)
         {
             string xmlString = @"<?xml version=""1.0"" encoding=""utf-8""?>
                   <env:Envelope xmlns:xsd=""http://www.w3.org/2001/XMLSchema""
@@ -215,7 +270,8 @@ namespace testconsole
                     case "serverUrl":
                         dict.Add("serverUrl",
                             //substitute Soap/u with data/v45
-                            Regex.Replace(n.FirstChild.InnerText.Substring(0, n.FirstChild.InnerText.LastIndexOf('/')), @"(Soap/u/)([\d\.]+)", "data/v$2"));
+                            Regex.Replace(n.FirstChild.InnerText.Substring(0, n.FirstChild.InnerText.LastIndexOf('/')), 
+                            @"(Soap/u/)([\d\.]+)", "data/v$2"));
                         break;
                     case "sessionId":
                         dict.Add("sessionId",n.FirstChild.InnerText);
@@ -230,23 +286,41 @@ namespace testconsole
     //https://github.com/gsscoder/commandline/wiki/Latest-Version
     {
         [Option('d', "salesforcedomain",
-            Default = "test", 
-            HelpText = "Represents a domain used to log into SalesForce from, e.g. https://test.salesforce.com", 
-            MetaValue ="test")]
+            Default = "test",
+            HelpText = "Represents a domain used to log into SalesForce from, e.g. https://test.salesforce.com",
+            MetaValue = "test")]
         public string SalesForceDomain { get; set; }
 
-        [Option('g', "groupname", Required =true
-            ,HelpText ="Name of the group in the KeePass file where to look for the entry")]
+        [Option('g', "groupname", Required = true
+            , HelpText = "Name of the group in the KeePass file where to look for the entry")]
         public string GroupName { get; set; }
 
         [Option('e', "entryname", Required = true,
-            HelpText ="Name of the Entry within the group in the KeePass file with necessary credentials")]
+            HelpText = "Name of the Entry within the group in the KeePass file with necessary credentials")]
         public string EntryName { get; set; }
 
         [Option('k', "kdbxpath", Required = true,
-            HelpText ="Path to the KeePass file with the credentials. The file must not be key-file protected!")]
+            HelpText = "Path to the KeePass file with the credentials. The file must not be key-file protected!")]
         public string KDBXPath { get; set; }
 
-        public string GetUsage() { return ""; }
+        [Option('o', "sfobject", Default = SFObjectsWithAttachments.Document)]
+        public SFObjectsWithAttachments SFObject { get; set; }
+
+        //[Usage()]
+        //public static IEnumerable<Example> Examples
+        //{
+        //    get
+        //    {
+        //        yield return new Example("Normal scenario", new Options { InputFile = "file.bin", OutputFile = "out.bin" });
+        //        yield return new Example("Logging warnings", UnParserSettings.WithGroupSwitchesOnly(), new Options { InputFile = "file.bin", LogWarning = true });
+        //        yield return new Example("Logging errors", new[] { UnParserSettings.WithGroupSwitchesOnly(), UnParserSettings.WithUseEqualTokenOnly() }, new Options { InputFile = "file.bin", LogError = true });
+        //    }
+        //}
+    }
+
+    enum SFObjectsWithAttachments
+    {
+        Attachment,
+        Document
     }
 }
