@@ -1,36 +1,34 @@
 ﻿using CommandLine;
-using CommandLine.Text;
 using KeePassLib;
 using KeePassLib.Collections;
 using KeePassLib.Interfaces;
 using KeePassLib.Keys;
 using KeePassLib.Security;
 using KeePassLib.Serialization;
+using Newtonsoft.Json.Linq;
 using PS_Ids_Async;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
-using Newtonsoft.Json.Linq;
 
 namespace testconsole
 {
     class Program
     {
-        private static readonly string memMappedFileName = @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\sfids.csv";
-        private static string pathToKeePassDb = @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\LINX_GERMANY.kdbx";
-        private static string groupName = "EPAM";
-        private static string entryName = "EPAM";
+        private static string pathToKeePassDb;//= @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\LINX_GERMANY.kdbx";
+        private static string groupName;
+        private static string entryName;
         private static string domainName;
         private static string objectWithAttachments;
-        private static int numberOfTHreads = 5;
+        private static int numberOfTHreads = 4;
         private static HttpClient client = new HttpClient();
 
         static async Task Main(string[] args)
@@ -78,6 +76,7 @@ namespace testconsole
             } while (key.Key != ConsoleKey.Enter);
 
             Dictionary<string, ProtectedString> dic = new Dictionary<string, ProtectedString>(OpenKeePassDB(securePwd));
+            Console.WriteLine($"Got {dic.Count} credentials");
             Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(dic));
             if (salesForceSID.Count == 0)
             {
@@ -85,15 +84,26 @@ namespace testconsole
                 Console.ReadKey();
                 return;
             }
+            
+            List<string> listIds = (await GetListOfIds(salesForceSID, objectWithAttachments)).ToList();
+            if (listIds.Count != 0)
+            {
+                Console.WriteLine($"Got {listIds.Count} Ids in the {objectWithAttachments} object");
+            }
+            else
+            {
+                Console.WriteLine("Nothing to extract. Exiting...");
+                Console.ReadKey();
+                return;
+            }
 
-            var l = await GetListOfIds(salesForceSID, objectWithAttachments);
-
-            Task[] tasks = new Task[numberOfTHreads];
+            List<Task> tasks = new List<Task>();
             for (int i = 0; i < numberOfTHreads; i++)
             {
-                tasks[i] = Task.Factory.StartNew(() => doWork(memMappedFileName, i.ToString()));
+                tasks.Add(Task.Run(
+                    () => doWork(i.ToString(), listIds.ToList(), salesForceSID, objectWithAttachments)));
             }
-            Task.WaitAll(tasks);
+            Task.WaitAll(tasks.ToArray());
             Console.WriteLine("All threads complete");
             Console.ReadKey();
         }
@@ -102,27 +112,14 @@ namespace testconsole
         {
             HttpResponseMessage listOfIds = new HttpResponseMessage();
             List<string> lst = new List<string>();
-            HttpRequestMessage msg = new HttpRequestMessage
-            {
-                Method = HttpMethod.Get,
-                RequestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj),
-                Headers = {
-                    { HttpRequestHeader.Accept.ToString(), "application/json" },
-                    { "Authorization", "Bearer " + dic["sessionId"] }
-                            }
-            };
+            
+            Uri requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj);
             
             while (true)
             {
-                try
-                {
-                    listOfIds = await client.SendAsync(msg);
-                }
-                catch
-                {
-                    break;
-                }
 
+                listOfIds = await ReadFromSalesForce(requestUri, dic);
+                
                 if (listOfIds.StatusCode != HttpStatusCode.OK) break;
 
                 var j = JObject.Parse(await listOfIds.Content.ReadAsStringAsync());
@@ -133,25 +130,34 @@ namespace testconsole
 
                 if (j["nextRecordsUrl"] != null)
                 {
-                    msg.RequestUri = new Uri(j["nextRecordsUrl"].ToString());
+                    requestUri = new Uri(j["nextRecordsUrl"].ToString());
                 }
                 else break;
             }
             return lst;
         }
 
-        static void doWork(string FileToOpen, string Id)
+        static async Task doWork(string Id, ICollection<string> listOfIds, IDictionary<string,string> creds, string obj)
         {
-            PS_Ids_Async.PowerShellId psid = PowerShellId.Create(FileToOpen);
-            string c;
-            string id = Id;
+            PowerShellId psid = new PowerShellId();
+            int currentId;
+            Guid guid = Guid.NewGuid();
             do
             {
-                c = psid.GetCurrentID();
-                if (!c.Equals(string.Empty))
+                currentId = psid.GetCurrentID();
+                if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
-                    Console.WriteLine($"Input from {id} value {c}");
-                    Thread.Sleep(500);
+                    HttpResponseMessage resp = await ReadFromSalesForce(
+                        new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + (listOfIds.ToList())[currentId] + "/Body")
+                        , creds);
+                    if(resp != null && resp.StatusCode == HttpStatusCode.OK)
+                        Console.WriteLine(
+                            $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {resp.Content.ReadAsStreamAsync().Result.Length} bytes read by a thread #{guid}");
+                    else
+                    {
+                        Console.WriteLine($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the que again");
+                        listOfIds.Append((listOfIds.ToList())[currentId]);
+                    }
                     continue;
                 }
                 break;
@@ -249,15 +255,22 @@ namespace testconsole
 
             try
             {
-                HttpResponseMessage msg = await client.SendAsync(httpRequestMessage);
-                if (msg.IsSuccessStatusCode) 
-                { 
-                    x.LoadXml(msg.Content.ReadAsStringAsync().Result); 
+                Console.WriteLine("Sending a request to SF for log-in...");
+                HttpResponseMessage msg = await client.SendAsync(httpRequestMessage,HttpCompletionOption.ResponseHeadersRead);
+                if (msg.IsSuccessStatusCode)
+                {
+                    Console.WriteLine("Got successful login response");
+                    x.LoadXml(msg.Content.ReadAsStringAsync().Result);
                 }
-                else return new Dictionary<string, string>();
+                else
+                {
+                    Console.WriteLine("SalesForce login failed");
+                    return new Dictionary<string, string>();
+                }
             }
-            catch
+            catch (Exception ex)
             {
+                Console.WriteLine(ex.Message);
                 return new Dictionary<string, string>();
             }
 
@@ -279,6 +292,29 @@ namespace testconsole
                 }
             }
             return dict;
+        }
+
+        static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, IDictionary<string,string> dic)
+        {
+            HttpResponseMessage response = new HttpResponseMessage();
+            List<string> lst = new List<string>();
+            HttpRequestMessage msg = new HttpRequestMessage
+            {
+                Method = HttpMethod.Get,
+                RequestUri = requestUri,
+                Headers = {
+                    { HttpRequestHeader.Accept.ToString(), "application/json" },
+                    { "Authorization", "Bearer " + dic["sessionId"] }
+                            }
+            };
+
+            try
+            {
+                response = await client.SendAsync(msg);
+            }
+            catch
+            {}
+            return response;
         }
     }
 
