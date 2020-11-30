@@ -8,18 +8,18 @@ using KeePassLib.Serialization;
 using Newtonsoft.Json.Linq;
 using PS_Ids_Async;
 using System;
-using System.IO;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Security;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Xml;
-using System.Security.Cryptography;
 
 namespace testconsole
 {
@@ -35,7 +35,7 @@ namespace testconsole
         private static ConsoleKeyInfo key;
         private static ICryptoTransform encryptor;
         private static object locker = new object();
-        private static string resultFileName = @"d:\encrypted.dat";
+        private static string resultFileName;
 
         static async Task Main(string[] args)
         {
@@ -49,12 +49,15 @@ namespace testconsole
                     entryName = opt.EntryName;
                     pathToKeePassDb = opt.KDBXPath;
                     objectWithAttachments = Enum.GetName(typeof(SFObjectsWithAttachments), opt.SFObject);
+                    resultFileName = opt.ecryptedAttachmentsTargetFile == null ?
+                        "encrypted_"+objectWithAttachments + ".dat" : opt.ecryptedAttachmentsTargetFile;
+
                     return 1;
                 },
                 (IEnumerable<Error> errs) =>
                 {
-                    Console.WriteLine("Press any key to exit...");
-                    Console.ReadKey();
+                    Console.WriteLine("Wait for 5 seconds or press any key to exit...");
+                    Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
                     Environment.Exit(-1);
                     return 0;
                 });
@@ -78,18 +81,25 @@ namespace testconsole
                 }
                 // Exit if Enter key is pressed.
             } while (key.Key != ConsoleKey.Enter);
+            Console.WriteLine();
 
             Dictionary<string, ProtectedString> credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(securePwd));
             Console.WriteLine($"Got {credentialsDict.Count} credentials");
+            if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3)
+            {
+                Console.WriteLine("Necessary cryptographic input is absent in the provided entry in the KDBX. Exiting...");
+                Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
+                return;
+            }
 
             Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(credentialsDict));
             if (salesForceSID.Count == 0)
             {
                 Console.WriteLine("Error getting SalesForce session ID. Exiting...");
-                Console.ReadKey();
+                Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
                 return;
             }
-            
+
             List<string> listOfIds = (await GetListOfIds(salesForceSID, objectWithAttachments)).ToList();
             if (listOfIds.Count != 0)
             {
@@ -98,10 +108,11 @@ namespace testconsole
             else
             {
                 Console.WriteLine("Nothing to extract. Exiting...");
-                Console.ReadKey();
+                Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
                 return;
             }
 
+            #region CryptographicStuff
             SymmetricAlgorithm cipher = SymmetricAlgorithm.Create("AesManaged");
             cipher.Mode = CipherMode.CBC;
             cipher.Padding = PaddingMode.PKCS7;
@@ -109,6 +120,7 @@ namespace testconsole
             Byte[] passwordKey = NewPasswordKey(SecureStringExten.ToSecureString(credentialsDict["AESPass"].ReadString()), 
                 credentialsDict["Salt"].ReadString());
             encryptor = cipher.CreateEncryptor(passwordKey, cipher.IV);
+            #endregion
 
             List<Task> tasks = new List<Task>();
             using (StreamWriter resultStream = new StreamWriter(resultFileName, false, Encoding.ASCII))
@@ -121,7 +133,7 @@ namespace testconsole
                 Task.WaitAll(tasks.ToArray());
             }
             Console.WriteLine("All threads complete");
-            Console.ReadKey();
+            Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
         }
 
         static Byte[] NewPasswordKey(SecureString password, string salt)
@@ -247,7 +259,8 @@ namespace testconsole
             {
                 PwDB.Close();
             }
-
+            //Delete key-value pairs where values are empty
+            dict.Where(d=>d.Value.IsEmpty).ToList().ForEach(t=>dict.Remove(t.Key));
             return dict;
         }
     
@@ -381,6 +394,10 @@ namespace testconsole
         [Option('o', "sfobject", Default = SFObjectsWithAttachments.Document,
             HelpText ="Points out which SalesForce object the body of attachments should be taken from")]
         public SFObjectsWithAttachments SFObject { get; set; }
+
+        [Option('t',"targetfile", //Default = "encrypted_Attachments.dat",
+            HelpText ="Set path to the target file to store encrypted attachments to")]
+        public string ecryptedAttachmentsTargetFile { get; set; }
     }
 
     enum SFObjectsWithAttachments
