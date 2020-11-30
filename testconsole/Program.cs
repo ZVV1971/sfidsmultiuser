@@ -8,6 +8,7 @@ using KeePassLib.Serialization;
 using Newtonsoft.Json.Linq;
 using PS_Ids_Async;
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -18,6 +19,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Xml;
+using System.Security.Cryptography;
 
 namespace testconsole
 {
@@ -30,6 +32,10 @@ namespace testconsole
         private static string objectWithAttachments;
         private static int numberOfTHreads = 4;
         private static HttpClient client = new HttpClient();
+        private static ConsoleKeyInfo key;
+        private static ICryptoTransform encryptor;
+        private static object locker = new object();
+        private static string resultFileName = @"d:\encrypted.dat";
 
         static async Task Main(string[] args)
         {
@@ -53,9 +59,7 @@ namespace testconsole
                     return 0;
                 });
 
-            //domainName = result.
             SecureString securePwd = new SecureString();
-            ConsoleKeyInfo key;
 
             Console.Write("Enter password for KeePass: ");
             do
@@ -75,9 +79,10 @@ namespace testconsole
                 // Exit if Enter key is pressed.
             } while (key.Key != ConsoleKey.Enter);
 
-            Dictionary<string, ProtectedString> dic = new Dictionary<string, ProtectedString>(OpenKeePassDB(securePwd));
-            Console.WriteLine($"Got {dic.Count} credentials");
-            Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(dic));
+            Dictionary<string, ProtectedString> credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(securePwd));
+            Console.WriteLine($"Got {credentialsDict.Count} credentials");
+
+            Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(credentialsDict));
             if (salesForceSID.Count == 0)
             {
                 Console.WriteLine("Error getting SalesForce session ID. Exiting...");
@@ -85,10 +90,10 @@ namespace testconsole
                 return;
             }
             
-            List<string> listIds = (await GetListOfIds(salesForceSID, objectWithAttachments)).ToList();
-            if (listIds.Count != 0)
+            List<string> listOfIds = (await GetListOfIds(salesForceSID, objectWithAttachments)).ToList();
+            if (listOfIds.Count != 0)
             {
-                Console.WriteLine($"Got {listIds.Count} Ids in the {objectWithAttachments} object");
+                Console.WriteLine($"Got {listOfIds.Count} Ids in the {objectWithAttachments} object");
             }
             else
             {
@@ -97,17 +102,36 @@ namespace testconsole
                 return;
             }
 
+            SymmetricAlgorithm cipher = SymmetricAlgorithm.Create("AesManaged");
+            cipher.Mode = CipherMode.CBC;
+            cipher.Padding = PaddingMode.PKCS7;
+            cipher.IV = Convert.FromBase64String(credentialsDict["IV"].ReadString());
+            Byte[] passwordKey = NewPasswordKey(SecureStringExten.ToSecureString(credentialsDict["AESPass"].ReadString()), 
+                credentialsDict["Salt"].ReadString());
+            encryptor = cipher.CreateEncryptor(passwordKey, cipher.IV);
+
             List<Task> tasks = new List<Task>();
-            for (int i = 0; i < numberOfTHreads; i++)
+            using (StreamWriter resultStream = new StreamWriter(resultFileName, false, Encoding.ASCII))
             {
-                tasks.Add(Task.Run(
-                    () => doWork(i.ToString(), listIds.ToList(), salesForceSID, objectWithAttachments)));
+                for (int i = 0; i < numberOfTHreads; i++)
+                {
+                    tasks.Add(Task.Run(
+                        () => doWork(i.ToString(), listOfIds.ToList(), salesForceSID, objectWithAttachments, encryptor, resultStream)));
+                }
+                Task.WaitAll(tasks.ToArray());
             }
-            Task.WaitAll(tasks.ToArray());
             Console.WriteLine("All threads complete");
             Console.ReadKey();
         }
 
+        static Byte[] NewPasswordKey(SecureString password, string salt)
+        {
+            int iterations = 1000;
+            int keySize = 256;
+            Rfc2898DeriveBytes PasswordDeriveBytes = new Rfc2898DeriveBytes(Marshal.PtrToStringAuto(Marshal.SecureStringToBSTR(password)),
+                Encoding.ASCII.GetBytes(salt), iterations, HashAlgorithmName.SHA256);
+            return PasswordDeriveBytes.GetBytes(keySize / 8);
+        }
         static async Task<IEnumerable<string>> GetListOfIds(IDictionary<string, string> dic, string obj)
         {
             HttpResponseMessage listOfIds = new HttpResponseMessage();
@@ -137,7 +161,7 @@ namespace testconsole
             return lst;
         }
 
-        static async Task doWork(string Id, ICollection<string> listOfIds, IDictionary<string,string> creds, string obj)
+        static async Task doWork(string Id, ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
             PowerShellId psid = new PowerShellId();
             int currentId;
@@ -150,12 +174,27 @@ namespace testconsole
                     HttpResponseMessage resp = await ReadFromSalesForce(
                         new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + (listOfIds.ToList())[currentId] + "/Body")
                         , creds);
-                    if(resp != null && resp.StatusCode == HttpStatusCode.OK)
+                    if (resp != null && resp.StatusCode == HttpStatusCode.OK)
+                    {
                         Console.WriteLine(
-                            $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {resp.Content.ReadAsStreamAsync().Result.Length} bytes read by a thread #{guid}");
+                              $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {resp.Content.ReadAsStreamAsync().Result.Length} bytes read by a thread #{guid}");
+                        using (MemoryStream stream = new MemoryStream())
+                        {
+                            using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Write))
+                            {
+                                cstream.Write(resp.Content.ReadAsByteArrayAsync().Result, 0, Convert.ToInt32(resp.Content.ReadAsStreamAsync().Result.Length));
+                                cstream.FlushFinalBlock();
+                                byte[] encrypted = stream.ToArray();
+                                lock (locker)
+                                {
+                                    writer.WriteLine(listOfIds.ToList()[currentId] + "," + Convert.ToBase64String(encrypted));
+                                }
+                            }
+                        }
+                    }
                     else
                     {
-                        Console.WriteLine($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the que again");
+                        Console.WriteLine($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the queue again");
                         listOfIds.Append((listOfIds.ToList())[currentId]);
                     }
                     continue;
@@ -327,8 +366,8 @@ namespace testconsole
             MetaValue = "test")]
         public string SalesForceDomain { get; set; }
 
-        [Option('g', "groupname", Required = true
-            , HelpText = "Name of the group in the KeePass file where to look for the entry")]
+        [Option('g', "groupname", Required = true,
+            HelpText = "Name of the group in the KeePass file where to look for the entry")]
         public string GroupName { get; set; }
 
         [Option('e', "entryname", Required = true,
@@ -339,19 +378,9 @@ namespace testconsole
             HelpText = "Path to the KeePass file with the credentials. The file must not be key-file protected!")]
         public string KDBXPath { get; set; }
 
-        [Option('o', "sfobject", Default = SFObjectsWithAttachments.Document)]
+        [Option('o', "sfobject", Default = SFObjectsWithAttachments.Document,
+            HelpText ="Points out which SalesForce object the body of attachments should be taken from")]
         public SFObjectsWithAttachments SFObject { get; set; }
-
-        //[Usage()]
-        //public static IEnumerable<Example> Examples
-        //{
-        //    get
-        //    {
-        //        yield return new Example("Normal scenario", new Options { InputFile = "file.bin", OutputFile = "out.bin" });
-        //        yield return new Example("Logging warnings", UnParserSettings.WithGroupSwitchesOnly(), new Options { InputFile = "file.bin", LogWarning = true });
-        //        yield return new Example("Logging errors", new[] { UnParserSettings.WithGroupSwitchesOnly(), UnParserSettings.WithUseEqualTokenOnly() }, new Options { InputFile = "file.bin", LogError = true });
-        //    }
-        //}
     }
 
     enum SFObjectsWithAttachments

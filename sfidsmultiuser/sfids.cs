@@ -1,4 +1,5 @@
 ﻿using System.IO.MemoryMappedFiles;
+using System.Security;
 using System.Threading;
 
 namespace PS_Ids_Async
@@ -39,5 +40,26 @@ namespace PS_Ids_Async
             memMutex.ReleaseMutex();
             return i;
         }
+    }
+}
+
+    public static class SecureStringExten
+    {
+        /// <summary>
+        /// Returns a Secure string from the source string
+        /// </summary>
+        /// <param name="Source"></param>
+        /// <returns></returns>
+        public static SecureString ToSecureString(this string source)
+        {
+            if (string.IsNullOrWhiteSpace(source))
+                return null;
+            else
+            {
+                SecureString result = new SecureString();
+                foreach (char c in source.ToCharArray())
+                    result.AppendChar(c);
+                return result;
+            }
     }
 }
