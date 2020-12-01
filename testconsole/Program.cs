@@ -30,7 +30,7 @@ namespace testconsole
         private static string entryName;
         private static string domainName;
         private static string objectWithAttachments;
-        private static int numberOfTHreads = 4;
+        private static int numberOfThreads = 4;
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
         private static ICryptoTransform encryptor;
@@ -125,7 +125,7 @@ namespace testconsole
             List<Task> tasks = new List<Task>();
             using (StreamWriter resultStream = new StreamWriter(resultFileName, false, Encoding.ASCII))
             {
-                for (int i = 0; i < numberOfTHreads; i++)
+                for (int i = 0; i < numberOfThreads; i++)
                 {
                     tasks.Add(Task.Run(
                         () => doWork(i.ToString(), listOfIds.ToList(), salesForceSID, objectWithAttachments, encryptor, resultStream)));
@@ -186,7 +186,7 @@ namespace testconsole
                     HttpResponseMessage resp = await ReadFromSalesForce(
                         new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + (listOfIds.ToList())[currentId] + "/Body")
                         , creds);
-                    if (resp != null && resp.StatusCode == HttpStatusCode.OK)
+                    if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
                     {
                         Console.WriteLine(
                               $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {resp.Content.ReadAsStreamAsync().Result.Length} bytes read by a thread #{guid}");
@@ -340,6 +340,10 @@ namespace testconsole
                         break;
                     case "sessionId":
                         dict.Add("sessionId",n.FirstChild.InnerText);
+                        break;
+                    case "userInfo":
+                        dict.Add("sessionSecondsValid", (n["sessionSecondsValid"]).InnerText);
+                        Console.WriteLine($"The session will be valid for {dict["sessionSecondsValid"]} seconds!");
                         break;
                 }
             }
