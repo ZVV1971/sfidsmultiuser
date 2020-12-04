@@ -37,6 +37,7 @@ namespace testconsole
         private static object locker = new object();
         private static string resultFileName;
 
+        [MTAThread]
         static async Task Main(string[] args)
         {
 

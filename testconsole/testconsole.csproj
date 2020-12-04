@@ -7,7 +7,7 @@
     <ProjectGuid>{E43BADF9-5D8E-4ED6-97B5-460BC85DB02F}</ProjectGuid>
     <OutputType>Exe</OutputType>
     <RootNamespace>testconsole</RootNamespace>
-    <AssemblyName>testconsole</AssemblyName>
+    <AssemblyName>AttachmentsBackup</AssemblyName>
     <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
@@ -114,6 +114,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+    <None Include="AttachmentsBackup.cmd" />
     <None Include="packages.config" />
     <None Include="Properties\app.manifest" />
     <None Include="testconsole_TemporaryKey.pfx" />
