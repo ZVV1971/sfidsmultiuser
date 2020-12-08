@@ -5,6 +5,7 @@ using KeePassLib.Interfaces;
 using KeePassLib.Keys;
 using KeePassLib.Security;
 using KeePassLib.Serialization;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PS_Ids_Async;
 using System;
@@ -30,13 +31,13 @@ namespace testconsole
         private static string entryName;
         private static string domainName;
         private static string objectWithAttachments;
-        private static int numberOfThreads = 6;
+        private static int numberOfThreads;
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
-        private static ICryptoTransform encryptor;
         private static string resultFileName;
         private static WorkingModes workingMode;
         private static List<string> listOfIds = null;
+        private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
 
         [MTAThread]
         static async Task Main(string[] args)
@@ -54,6 +55,7 @@ namespace testconsole
                     resultFileName = opt.ecryptedAttachmentsTargetFile == null ?
                         "encrypted_" + objectWithAttachments + ".dat" : opt.ecryptedAttachmentsTargetFile;
                     workingMode = opt.WorkMode;
+                    numberOfThreads = opt.numberOfWorkingThreads;
                     return 1;
                 },
                 (IEnumerable<Error> errs) =>
@@ -124,20 +126,6 @@ namespace testconsole
                         Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
                         Environment.Exit(-3);
                     }
-                    else
-                    {
-                        using (StreamReader reader = new StreamReader(resultFileName))
-                        {
-                            string line = reader.ReadLine();
-                            Regex reg = new Regex(@"^[a-zA-Z\d]{18},");
-                            if (line == null || reg.Match(line).Captures.Count == 0)
-                            {
-                                Console.WriteLine("Wrong input file format. Exiting...");
-                                Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
-                                Environment.Exit(-4);
-                            }
-                        }
-                    }
                     break; ;
             }
 
@@ -146,9 +134,8 @@ namespace testconsole
             cipher.Mode = CipherMode.CBC;
             cipher.Padding = PaddingMode.PKCS7;
             cipher.IV = Convert.FromBase64String(credentialsDict["IV"].ReadString());
-            Byte[] passwordKey = NewPasswordKey(SecureStringExten.ToSecureString(credentialsDict["AESPass"].ReadString()),
+            Byte[] passwordKey = NewPasswordKey(SecureStringExtension.ToSecureString(credentialsDict["AESPass"].ReadString()),
                 credentialsDict["Salt"].ReadString());
-            encryptor = cipher.CreateEncryptor(passwordKey, cipher.IV);
             #endregion
 
             List<Task> tasks = new List<Task>();
@@ -160,7 +147,7 @@ namespace testconsole
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
-                                () => doWork(listOfIds.ToList(), salesForceSID, objectWithAttachments, encryptor, resultStream)));
+                                () => doWork(listOfIds.ToList(), salesForceSID, objectWithAttachments, cipher.CreateEncryptor(passwordKey, cipher.IV), resultStream)));
                         }
                         Task.WaitAll(tasks.ToArray());
                     }
@@ -168,10 +155,43 @@ namespace testconsole
                 case WorkingModes.Write:
                     using (TextReader sourceStream = TextReader.Synchronized(new StreamReader(resultFileName)))
                     {
-                        for(int i = 0; i < numberOfThreads; i++)
+                        minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
+                        _ = Task.Factory.StartNew(() =>
+                              {
+                                  using (StreamReader reader = new StreamReader(resultFileName))
+                                  {
+                                      int i = 1;
+                                      string line;
+                                      Regex reg = new Regex(@"^[a-zA-Z\d]{18},");
+                                      while (true)
+                                      {
+                                          line = reader.ReadLine();
+                                          if (line == null)
+                                          {
+                                              minSizeQueue.Close();
+                                              break;
+                                          }
+                                          else if (reg.Match(line).Captures.Count == 0)
+                                          {
+                                              Console.WriteLine($"Row #{i++} contains malformatted id");
+                                              continue;
+                                          }
+                                          string[] strs = line.Split(',');
+                                          if (!IsBase64String(strs[1]))
+                                          {
+                                              Console.WriteLine($"Row #{i++} contains malformatted Base64 body");
+                                              continue;
+                                          }
+                                          minSizeQueue.Enqueue(new KeyValuePair<string, string>(strs[0], strs[1]));
+                                          i++;
+                                      }
+                                  }
+                              });
+
+                        for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
-                                () => doWork(salesForceSID, objectWithAttachments, encryptor, sourceStream)));
+                                () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, cipher.CreateDecryptor(passwordKey, cipher.IV), sourceStream)));
                         }
                         Task.WaitAll(tasks.ToArray());
                     }
@@ -199,7 +219,7 @@ namespace testconsole
             while (true)
             {
 
-                listOfIds = await ReadFromSalesForce(requestUri, dic, HttpMethod.Get);
+                listOfIds = await ReadFromSalesForce(requestUri, dic, HttpMethod.Get, null);
                 
                 if (listOfIds.StatusCode != HttpStatusCode.OK) break;
 
@@ -230,7 +250,7 @@ namespace testconsole
                 {
                     HttpResponseMessage resp = await ReadFromSalesForce(
                         new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + (listOfIds.ToList())[currentId] + "/Body")
-                        , creds, HttpMethod.Get);
+                        , creds, HttpMethod.Get, null);
                     if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
                     {
                         Console.WriteLine(
@@ -257,35 +277,57 @@ namespace testconsole
             } while (true);
         }
 
-        static async Task doWork(IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextReader reader) 
+        static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextReader reader) 
         {
-            PowerShellId psid = new PowerShellId();
-            int currentId;
             Guid guid = Guid.NewGuid();
-            Regex reg = new Regex(@"^[a-zA-Z\d]{18},");
-            string line;
-            do
+            while (true) 
             {
-                currentId = psid.GetCurrentID();
-                while (true) 
+                KeyValuePair<string, string> att;
+                if (minSizeQueue.TryDequeue(out att))
                 {
-                    line = reader.ReadLine();
-                    if (line == null || line.Equals(string.Empty)) break;
-                    if (reg.Match(line).Captures.Count == 0) 
+                    byte[] valueBytes = Convert.FromBase64String(att.Value);
+                    if (valueBytes.Length > 0) 
                     {
-                        Console.WriteLine("SalesForce Id in the row is ivalid; skipping the row");
-                        continue;
+                        using (MemoryStream stream = new MemoryStream(Convert.FromBase64String(att.Value)))
+                        {
+                            using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Read))
+                            {
+                                byte[] decrypted = new byte[valueBytes.Length];
+                                try
+                                {
+                                    int bytesRead = cstream.Read(decrypted, 0, valueBytes.Length);
+                                    if (bytesRead > 0)
+                                    {
+                                        string decryptedValue = Convert.ToBase64String(decrypted);
+                                        Attachment attachment = new Attachment();
+                                        attachment.Body = decryptedValue;
+                                        string json = JsonConvert.SerializeObject(attachment);
+                                        HttpResponseMessage response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key),
+                                            creds, new HttpMethod("PATCH"), json);
+                                        if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
+                                        {
+                                            Console.WriteLine($"{att.Key} has been successfully updated by {guid}.");
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine($"{att.Key} failed to update by {guid}. {response?.StatusCode}");
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
+                                }
+                            }
+                        } 
                     }
-                    string b64 = line.Split(',')[1];
-                    if (!IsBase64String(b64))
-                    {
-                        Console.WriteLine($"The base64 encoded body for {reg.Match(line).Captures[0]} is in wrong format; skipping the line");
-                    }
-                    HttpResponseMessage response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + (listOfIds.ToList())[currentId]),
-                        creds, new HttpMethod("PATCH"));
                 }
-                break;
-            } while (true);
+                else 
+                {
+                    minSizeQueue.Close();
+                    break; 
+                }
+            }
         }
 
         public static bool IsBase64String(string s)
@@ -430,7 +472,7 @@ namespace testconsole
             return dict;
         }
 
-        static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, IDictionary<string,string> dic, HttpMethod method)
+        static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, IDictionary<string,string> dic, HttpMethod method, string content)
         {
             HttpResponseMessage response = new HttpResponseMessage();
             List<string> lst = new List<string>();
@@ -441,15 +483,21 @@ namespace testconsole
                 Headers = {
                     { HttpRequestHeader.Accept.ToString(), "application/json" },
                     { "Authorization", "Bearer " + dic["sessionId"] }
-                            }
+                }
             };
+            if (content != null) 
+            { 
+                msg.Content = new StringContent(content, Encoding.UTF8, "application/json"); 
+            }
 
             try
             {
                 response = await client.SendAsync(msg);
             }
-            catch
-            {}
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+            }
             return response;
         }
     }
@@ -488,6 +536,10 @@ namespace testconsole
         [Option('t',"targetfile", //Default = "encrypted_Attachments.dat",
             HelpText ="Set path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
         public string ecryptedAttachmentsTargetFile { get; set; }
+
+        [Option('n',"threads", Default = 2,
+            HelpText ="Set the number of concurrent threads")]
+        public int numberOfWorkingThreads { get; set; }
     }
 
     enum SFObjectsWithAttachments
@@ -501,5 +553,10 @@ namespace testconsole
         Read,
         Write,
         Compare
+    }
+
+    public class Attachment
+    {
+        public string Body;
     }
 }
