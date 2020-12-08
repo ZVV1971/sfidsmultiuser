@@ -198,7 +198,7 @@ namespace testconsole
                         break;
             }
             Console.WriteLine("All threads complete");
-            Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
+            Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(30.0));
         }
 
         static Byte[] NewPasswordKey(SecureString password, string salt)
@@ -307,6 +307,10 @@ namespace testconsole
                                         if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
                                         {
                                             Console.WriteLine($"{att.Key} has been successfully updated by {guid}.");
+                                        }
+                                        else if (response.StatusCode == HttpStatusCode.NoContent)
+                                        {
+                                            Console.WriteLine($"{att.Key}'s content has obviously been modified by {guid}, though \"no content\" has been returned.");
                                         }
                                         else
                                         {
@@ -430,7 +434,7 @@ namespace testconsole
             try
             {
                 Console.WriteLine("Sending a request to SF for log-in...");
-                HttpResponseMessage msg = await client.SendAsync(httpRequestMessage,HttpCompletionOption.ResponseHeadersRead);
+                HttpResponseMessage msg = await client.SendAsync(httpRequestMessage, HttpCompletionOption.ResponseHeadersRead);
                 if (msg.IsSuccessStatusCode)
                 {
                     Console.WriteLine("Got successful login response");
@@ -485,14 +489,14 @@ namespace testconsole
                     { "Authorization", "Bearer " + dic["sessionId"] }
                 }
             };
-            if (content != null) 
-            { 
-                msg.Content = new StringContent(content, Encoding.UTF8, "application/json"); 
+            if (content != null)
+            {
+                msg.Content = new StringContent(content, Encoding.UTF8, "application/json");
             }
 
             try
             {
-                response = await client.SendAsync(msg);
+                response = await client.SendAsync(msg, HttpCompletionOption.ResponseContentRead);
             }
             catch (Exception ex)
             {
