@@ -26,7 +26,7 @@ namespace testconsole
 {
     class Program
     {
-        private static string pathToKeePassDb;//= @"C:\Users\Uladzimir_Zakharenka\source\repos\ZVV1971\sfidsmultiuser\LINX_GERMANY.kdbx";
+        private static string pathToKeePassDb;
         private static string groupName;
         private static string entryName;
         private static string domainName;
@@ -38,6 +38,7 @@ namespace testconsole
         private static WorkingModes workingMode;
         private static List<string> listOfIds = null;
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
+        private static TimeSpan waittime = TimeSpan.FromSeconds(30);
 
         [MTAThread]
         static async Task Main(string[] args)
@@ -56,12 +57,20 @@ namespace testconsole
                         "encrypted_" + objectWithAttachments + ".dat" : opt.ecryptedAttachmentsTargetFile;
                     workingMode = opt.WorkMode;
                     numberOfThreads = opt.numberOfWorkingThreads;
+                    if(workingMode == WorkingModes.Compare && 
+                        (opt.comparisonResultsFilePath == null || opt.comparisonResultsFilePath.Equals(String.Empty))) 
+                    {
+                        Console.WriteLine("If workmode is set to compare then comparison file must be provided.\nWait for 5 seconds or press any key to exit...");
+                        Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+                        Environment.Exit(-1);
+                        return 0;
+                    }
                     return 1;
                 },
                 (IEnumerable<Error> errs) =>
                 {
                     Console.WriteLine("Wait for 5 seconds or press any key to exit...");
-                    Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(15.0));
+                    Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                     Environment.Exit(-1);
                     return 0;
                 });
@@ -92,7 +101,7 @@ namespace testconsole
             if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3)
             {
                 Console.WriteLine("Necessary cryptographic input is absent in the provided entry in the KDBX. Exiting...");
-                Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
+                Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                 return;
             }
 
@@ -100,7 +109,7 @@ namespace testconsole
             if (salesForceSID.Count == 0)
             {
                 Console.WriteLine("Error getting SalesForce session ID. Exiting...");
-                Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
+                Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                 return;
             }
 
@@ -115,15 +124,16 @@ namespace testconsole
                     else
                     {
                         Console.WriteLine("Nothing to extract. Exiting...");
-                        Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
+                        Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                         Environment.Exit(-2);
                     }
                     break;
                 case WorkingModes.Write:
+                case WorkingModes.Compare:
                     if (!File.Exists(resultFileName))
                     {
                         Console.WriteLine("Source file does not exist. Exiting...");
-                        Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(5.0));
+                        Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                         Environment.Exit(-3);
                     }
                     break; ;
@@ -196,9 +206,14 @@ namespace testconsole
                         Task.WaitAll(tasks.ToArray());
                     }
                         break;
+                case WorkingModes.Compare:
+                    Console.WriteLine("Not yet implemented");
+                    Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+                    Environment.Exit(0);
+                    break;
             }
             Console.WriteLine("All threads complete");
-            Task.Factory.StartNew(() => Console.ReadKey()).Wait(TimeSpan.FromSeconds(30.0));
+            Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
         }
 
         static Byte[] NewPasswordKey(SecureString password, string salt)
@@ -544,6 +559,10 @@ namespace testconsole
         [Option('n',"threads", Default = 2,
             HelpText ="Set the number of concurrent threads")]
         public int numberOfWorkingThreads { get; set; }
+
+        [Option ('c', "comppath",
+            HelpText ="Path to the file with comparison results")]
+        public string comparisonResultsFilePath { get; set; }
     }
 
     enum SFObjectsWithAttachments
