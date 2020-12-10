@@ -26,6 +26,7 @@ namespace testconsole
 {
     class Program
     {
+        #region fields
         private static string pathToKeePassDb;
         private static string groupName;
         private static string entryName;
@@ -39,7 +40,7 @@ namespace testconsole
         private static List<string> listOfIds = null;
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
         private static TimeSpan waittime = TimeSpan.FromSeconds(30);
-
+        #endregion fields
         [MTAThread]
         static async Task Main(string[] args)
         {
@@ -300,9 +301,19 @@ namespace testconsole
                 KeyValuePair<string, string> att;
                 if (minSizeQueue.TryDequeue(out att))
                 {
-                    byte[] valueBytes = Convert.FromBase64String(att.Value);
+                    byte[] valueBytes = null;
+                    try
+                    {
+                        valueBytes = Convert.FromBase64String(att.Value);
+                    }
+                    catch
+                    {
+                        Console.WriteLine($"Error decoding Base64 value for {att.Key}");
+                        continue;
+                    }
                     if (valueBytes.Length > 0) 
                     {
+                        //MemoryStream to store decrypted body to
                         using (MemoryStream stream = new MemoryStream(Convert.FromBase64String(att.Value)))
                         {
                             using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Read))
@@ -339,6 +350,10 @@ namespace testconsole
                                 }
                             }
                         } 
+                    }
+                    else
+                    {
+                        Console.WriteLine($"{att.Key} didn't give any body for writing.");
                     }
                 }
                 else 
