@@ -32,10 +32,11 @@ namespace testconsole
         private static string entryName;
         private static string domainName;
         private static string objectWithAttachments;
+        private static string resultFileName;
+        private static string pathToComparisonResults;
         private static int numberOfThreads;
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
-        private static string resultFileName;
         private static WorkingModes workingMode;
         private static List<string> listOfIds = null;
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
@@ -65,6 +66,10 @@ namespace testconsole
                         Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                         Environment.Exit(-1);
                         return 0;
+                    }
+                    else
+                    {
+                        pathToComparisonResults = opt.comparisonResultsFilePath;
                     }
                     return 1;
                 },
@@ -114,6 +119,7 @@ namespace testconsole
                 return;
             }
 
+            #region ChecksOfNeededFiles
             switch (workingMode)
             {
                 case WorkingModes.Read:
@@ -139,6 +145,7 @@ namespace testconsole
                     }
                     break; ;
             }
+            #endregion
 
             #region CryptographicStuff
             SymmetricAlgorithm cipher = SymmetricAlgorithm.Create("AesManaged");
@@ -149,6 +156,7 @@ namespace testconsole
                 credentialsDict["Salt"].ReadString());
             #endregion
 
+            #region StartWorkers
             List<Task> tasks = new List<Task>();
             switch (workingMode) 
             {
@@ -164,60 +172,71 @@ namespace testconsole
                     }
                     break;
                 case WorkingModes.Write:
-                    using (TextReader sourceStream = TextReader.Synchronized(new StreamReader(resultFileName)))
-                    {
-                        minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
-                        _ = Task.Factory.StartNew(() =>
-                              {
-                                  using (StreamReader reader = new StreamReader(resultFileName))
-                                  {
-                                      int i = 1;
-                                      string line;
-                                      Regex reg = new Regex(@"^[a-zA-Z\d]{18},");
-                                      while (true)
-                                      {
-                                          line = reader.ReadLine();
-                                          if (line == null)
-                                          {
-                                              minSizeQueue.Close();
-                                              break;
-                                          }
-                                          else if (reg.Match(line).Captures.Count == 0)
-                                          {
-                                              Console.WriteLine($"Row #{i++} contains malformatted id");
-                                              continue;
-                                          }
-                                          string[] strs = line.Split(',');
-                                          if (!IsBase64String(strs[1]))
-                                          {
-                                              Console.WriteLine($"Row #{i++} contains malformatted Base64 body");
-                                              continue;
-                                          }
-                                          minSizeQueue.Enqueue(new KeyValuePair<string, string>(strs[0], strs[1]));
-                                          i++;
-                                      }
-                                  }
-                              });
+                    minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
+                    _ = FillQueue();
 
+                    for (int i = 0; i < numberOfThreads; i++)
+                    {
+                        tasks.Add(Task.Run(
+                            () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, cipher.CreateDecryptor(passwordKey, cipher.IV))));
+                    }
+                    Task.WaitAll(tasks.ToArray());
+                    break;
+                case WorkingModes.Compare:
+                    minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
+                    _ = FillQueue();
+                    using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(pathToComparisonResults, false, Encoding.ASCII)))
+                    {
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
-                                () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, cipher.CreateDecryptor(passwordKey, cipher.IV), sourceStream)));
+                                () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, cipher.CreateDecryptor(passwordKey, cipher.IV), resultStream)));
                         }
                         Task.WaitAll(tasks.ToArray());
                     }
-                        break;
-                case WorkingModes.Compare:
-                    Console.WriteLine("Not yet implemented");
-                    Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
-                    Environment.Exit(0);
                     break;
             }
             Console.WriteLine("All threads complete");
             Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
         }
+        #endregion
 
-        static Byte[] NewPasswordKey(SecureString password, string salt)
+        #region Methods
+        private static Task FillQueue()
+        {
+            return Task.Factory.StartNew(() =>
+            {
+                using (StreamReader reader = new StreamReader(resultFileName))
+                {
+                    int i = 1;
+                    string line;
+                    Regex reg = new Regex(@"^[a-zA-Z\d]{18},");
+                    while (true)
+                    {
+                        line = reader.ReadLine();
+                        if (line == null)
+                        {
+                            minSizeQueue.Close();
+                            break;
+                        }
+                        else if (reg.Match(line).Captures.Count == 0)
+                        {
+                            Console.WriteLine($"Row #{i++} contains malformatted id");
+                            continue;
+                        }
+                        string[] strs = line.Split(',');
+                        if (!IsBase64String(strs[1]))
+                        {
+                            Console.WriteLine($"Row #{i++} contains malformatted Base64 body");
+                            continue;
+                        }
+                        minSizeQueue.Enqueue(new KeyValuePair<string, string>(strs[0], strs[1]));
+                        i++;
+                    }
+                }
+            });
+        }
+        private static Byte[] NewPasswordKey(SecureString password, string salt)
         {
             int iterations = 1000;
             int keySize = 256;
@@ -254,6 +273,7 @@ namespace testconsole
             return lst;
         }
 
+        //A worker for Read mode
         static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
             PowerShellId psid = new PowerShellId();
@@ -293,7 +313,8 @@ namespace testconsole
             } while (true);
         }
 
-        static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextReader reader) 
+        //A worker for Write mode
+        static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
         {
             Guid guid = Guid.NewGuid();
             while (true) 
@@ -364,6 +385,72 @@ namespace testconsole
             }
         }
 
+        //A worker for Compare mode
+        static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
+        {
+            Guid guid = Guid.NewGuid();
+            while (true)
+            {
+                KeyValuePair<string, string> att;
+                if (minSizeQueue.TryDequeue(out att))
+                {
+                    byte[] valueBytes = null;
+                    try
+                    {
+                        valueBytes = Convert.FromBase64String(att.Value);
+                    }
+                    catch
+                    {
+                        Console.WriteLine($"Error decoding Base64 value for {att.Key}");
+                        continue;
+                    }
+                    if (valueBytes.Length > 0)
+                    {
+                        using (MemoryStream stream = new MemoryStream(Convert.FromBase64String(att.Value)))
+                        using (SHA256 mySHA256 = SHA256.Create())
+                        {
+                            using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Read))
+                            {
+                                byte[] decrypted = new byte[valueBytes.Length];
+                                try
+                                {
+                                    int bytesRead = cstream.Read(decrypted, 0, valueBytes.Length);
+                                    if (bytesRead > 0)
+                                    {
+                                        string decryptedValue = Convert.ToBase64String(decrypted);
+                                        HttpResponseMessage response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key + "/Body"),
+                                            creds, HttpMethod.Get, null);
+                                        if(response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
+                                        {
+                                            if (mySHA256.ComputeHash(response.Content.ReadAsStreamAsync().Result) ==
+                                                mySHA256.ComputeHash(decrypted)) 
+                                            {
+                                                writer.WriteLine(att.Key + ",EQ");
+                                            }
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine($"{att.Key} failed to read.");
+                                            writer.WriteLine(att.Key + ",SF_ERROR");
+                                        }
+                                        continue;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        minSizeQueue.Close();
+                        break;
+                    }
+                }
+            }
+        }
         public static bool IsBase64String(string s)
         {
             s = s.Trim();
@@ -534,6 +621,7 @@ namespace testconsole
             }
             return response;
         }
+        #endregion
     }
 
     class Options
