@@ -10,6 +10,7 @@ using Newtonsoft.Json.Linq;
 using PS_Ids_Async;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -19,12 +20,13 @@ using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 
 namespace testconsole
 {
-    class Program
+    class AttachmentsBackup
     {
         #region fields
         private static string pathToKeePassDb;
@@ -41,10 +43,13 @@ namespace testconsole
         private static List<string> listOfIds = null;
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
         private static TimeSpan waittime = TimeSpan.FromSeconds(30);
+        private static ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener();
         #endregion fields
         [MTAThread]
         static async Task Main(string[] args)
         {
+            consoleTraceListener.TraceEvent(new TraceEventCache(), "AttachmentsBackup", TraceEventType.Information, 0);
+            Trace.Listeners.Add(consoleTraceListener);
 
             int result = Parser.Default.ParseArguments<Options>(args)
                 .MapResult(
@@ -62,7 +67,8 @@ namespace testconsole
                     if(workingMode == WorkingModes.Compare && 
                         (opt.comparisonResultsFilePath == null || opt.comparisonResultsFilePath.Equals(String.Empty))) 
                     {
-                        Console.WriteLine("If workmode is set to compare then comparison file must be provided.\nWait for 5 seconds or press any key to exit...");
+                        Trace.TraceError($"If workmode is set to compare then comparison file must be provided." +
+                            $"\nWait for {waittime.Seconds} seconds or press any key to exit...");
                         Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                         Environment.Exit(-1);
                         return 0;
@@ -71,6 +77,11 @@ namespace testconsole
                     {
                         pathToComparisonResults = opt.comparisonResultsFilePath;
                     }
+                    if(opt.logFilePath != null && !opt.logFilePath.Equals(String.Empty))
+                    {
+                        Trace.Listeners.Add(new TextWriterTraceListener(opt.logFilePath));
+                    }
+                    Trace.TraceInformation("Arguments have been successfully parsed");
                     return 1;
                 },
                 (IEnumerable<Error> errs) =>
@@ -163,6 +174,7 @@ namespace testconsole
                 case WorkingModes.Read:
                     using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(resultFileName, false, Encoding.ASCII)))
                     {
+                        Console.WriteLine($"Initiating {numberOfThreads} workers to read data.");
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
@@ -174,7 +186,7 @@ namespace testconsole
                 case WorkingModes.Write:
                     minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
                     _ = FillQueue();
-
+                    Console.WriteLine($"Initiating {numberOfThreads} workers to write data.");
                     for (int i = 0; i < numberOfThreads; i++)
                     {
                         tasks.Add(Task.Run(
@@ -187,6 +199,7 @@ namespace testconsole
                     _ = FillQueue();
                     using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(pathToComparisonResults, false, Encoding.ASCII)))
                     {
+                        Console.WriteLine($"Initiating {numberOfThreads} workers to compare data.");
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
@@ -278,7 +291,8 @@ namespace testconsole
         {
             PowerShellId psid = new PowerShellId();
             int currentId;
-            Guid guid = Guid.NewGuid();
+            int currentThreadId = Thread.CurrentThread.ManagedThreadId;
+            Console.WriteLine($"A worker {currentThreadId} has started.");
             do
             {
                 currentId = psid.GetCurrentID();
@@ -289,16 +303,19 @@ namespace testconsole
                         , creds, HttpMethod.Get, null);
                     if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
                     {
-                        Console.WriteLine(
-                              $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {resp.Content.ReadAsStreamAsync().Result.Length} bytes read by a thread #{guid}");
-                        using (MemoryStream stream = new MemoryStream())
+                        using (MemoryStream ms = resp.Content.ReadAsStreamAsync().Result as MemoryStream)
                         {
-                            using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Write))
+                            Console.WriteLine(
+                                  $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {ms.Length} bytes read by a thread #{currentThreadId}");
+                            using (MemoryStream stream = new MemoryStream())
                             {
-                                cstream.Write(resp.Content.ReadAsByteArrayAsync().Result, 0, Convert.ToInt32(resp.Content.ReadAsStreamAsync().Result.Length));
-                                cstream.FlushFinalBlock();
-                                byte[] encrypted = stream.ToArray();
-                                writer.WriteLine(listOfIds.ToList()[currentId] + "," + Convert.ToBase64String(encrypted));
+                                using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Write))
+                                {
+                                    cstream.Write(ms.ToArray(), 0, Convert.ToInt32(ms.Length));
+                                    cstream.FlushFinalBlock();
+                                    byte[] encrypted = stream.ToArray();
+                                    writer.WriteLine(listOfIds.ToList()[currentId] + "," + Convert.ToBase64String(encrypted));
+                                }
                             }
                         }
                     }
@@ -311,12 +328,14 @@ namespace testconsole
                 }
                 break;
             } while (true);
+            Console.WriteLine($"A worker {currentThreadId} has finished the work.");
         }
 
         //A worker for Write mode
         static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
         {
-            Guid guid = Guid.NewGuid();
+            int currentThreadId = Thread.CurrentThread.ManagedThreadId;
+            Console.WriteLine($"A worker {currentThreadId} has started.");
             while (true) 
             {
                 KeyValuePair<string, string> att;
@@ -353,21 +372,21 @@ namespace testconsole
                                             creds, new HttpMethod("PATCH"), json);
                                         if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
                                         {
-                                            Console.WriteLine($"{att.Key} has been successfully updated by {guid}.");
+                                            Console.WriteLine($"{att.Key} has been successfully updated by {currentThreadId}.");
                                         }
                                         else if (response.StatusCode == HttpStatusCode.NoContent)
                                         {
-                                            Console.WriteLine($"{att.Key}'s content has obviously been modified by {guid}, though \"no content\" has been returned.");
+                                            Console.WriteLine($"{att.Key}'s content has obviously been modified by {currentThreadId}, though \"no content\" has been returned.");
                                         }
                                         else
                                         {
-                                            Console.WriteLine($"{att.Key} failed to update by {guid}. {response?.StatusCode}");
+                                            Console.WriteLine($"{att.Key} failed to update by {currentThreadId}. {response?.StatusCode}");
                                         }
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    Console.WriteLine($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
+                                    Console.WriteLine($"{ex.Message}\noccured while trying to update {att.Key} from {currentThreadId}");
                                 }
                             }
                         } 
@@ -383,14 +402,19 @@ namespace testconsole
                     break; 
                 }
             }
+            Console.WriteLine($"A worker {currentThreadId} has finished the work.");
         }
 
         //A worker for Compare mode
         static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
-            Guid guid = Guid.NewGuid();
+            Console.WriteLine($"A worker {Task.CurrentId} has started.");
+            PowerShellId psid = new PowerShellId();
+            int currentId;
+            int currentThreadId = Thread.CurrentThread.ManagedThreadId;
             while (true)
             {
+                currentId = psid.GetCurrentID();
                 KeyValuePair<string, string> att;
                 if (minSizeQueue.TryDequeue(out att))
                 {
@@ -407,7 +431,6 @@ namespace testconsole
                     if (valueBytes.Length > 0)
                     {
                         using (MemoryStream stream = new MemoryStream(Convert.FromBase64String(att.Value)))
-                        using (SHA256 mySHA256 = SHA256.Create())
                         {
                             using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Read))
                             {
@@ -422,34 +445,41 @@ namespace testconsole
                                             creds, HttpMethod.Get, null);
                                         if(response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
                                         {
-                                            if (mySHA256.ComputeHash(response.Content.ReadAsStreamAsync().Result) ==
-                                                mySHA256.ComputeHash(decrypted)) 
+                                            using (MemoryStream ms = new MemoryStream())
                                             {
-                                                writer.WriteLine(att.Key + ",EQ");
+                                                response.Content.ReadAsStreamAsync().Result.CopyTo(ms);
+                                                byte[] res = ms.ToArray();
+                                                Array.Resize<byte>(ref decrypted, res.Length);
+                                                if (res.SequenceEqual(decrypted))
+                                                {
+                                                    Console.WriteLine($"#{currentId} - {att.Key} is Equal from {currentThreadId}.");
+                                                    writer.WriteLine(att.Key + ",EQ");
+                                                }
+                                                else Console.WriteLine($"#{currentId} - {att.Key} is OK from {currentThreadId}.");
                                             }
                                         }
                                         else
                                         {
-                                            Console.WriteLine($"{att.Key} failed to read.");
+                                            Console.WriteLine($"#{currentId} - {att.Key} failed to read from {currentThreadId}.");
                                             writer.WriteLine(att.Key + ",SF_ERROR");
                                         }
-                                        continue;
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    Console.WriteLine($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
+                                    Console.WriteLine($"{ex.Message}\noccured while trying to compare {att.Key} from {currentThreadId}");
                                 }
                             }
                         }
                     }
-                    else
-                    {
-                        minSizeQueue.Close();
-                        break;
-                    }
+                }
+                else
+                {
+                    minSizeQueue.Close();
+                    break;
                 }
             }
+            Console.WriteLine($"A worker {currentThreadId} has finished the work.");
         }
         public static bool IsBase64String(string s)
         {
@@ -629,7 +659,8 @@ namespace testconsole
     {
         [Option('m', "workmode",
             Default = WorkingModes.Read,
-            HelpText ="Set the working mode.\nRead - to read the data from the SF org and store them into a file;\nwrite - to read the data from encrypted file and store them back into the SF org;\ncompare - to compare the data from the encrypted file and SF org.")]
+            HelpText ="Set the working mode.\nRead - to read the data from the SF org and store them into a file;" +
+            "\nwrite - to read the data from encrypted file and store them back into the SF org;\ncompare - to compare the data from the encrypted file and SF org.")]
 
         public WorkingModes WorkMode { get; set; }
 
@@ -640,32 +671,36 @@ namespace testconsole
         public string SalesForceDomain { get; set; }
 
         [Option('g', "groupname", Required = true,
-            HelpText = "Name of the group in the KeePass file where to look for the entry")]
+            HelpText = "Gives the name of the group in the KeePass file where to look for the entry")]
         public string GroupName { get; set; }
 
         [Option('e', "entryname", Required = true,
-            HelpText = "Name of the Entry within the group in the KeePass file with necessary credentials")]
+            HelpText = "Gives the name of the Entry within the group in the KeePass file with necessary credentials")]
         public string EntryName { get; set; }
 
         [Option('k', "kdbxpath", Required = true,
-            HelpText = "Path to the KeePass file with the credentials. The file must not be key-file protected!")]
+            HelpText = "Sets path to the KeePass file with the credentials. The file must not be key-file protected!")]
         public string KDBXPath { get; set; }
 
         [Option('o', "sfobject", Default = SFObjectsWithAttachments.Document,
             HelpText ="Points out which SalesForce object the body of attachments should be taken from")]
         public SFObjectsWithAttachments SFObject { get; set; }
 
-        [Option('t',"targetfile", //Default = "encrypted_Attachments.dat",
-            HelpText ="Set path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
+        [Option('t',"targetfile",
+            HelpText ="Sets path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
         public string ecryptedAttachmentsTargetFile { get; set; }
 
         [Option('n',"threads", Default = 2,
-            HelpText ="Set the number of concurrent threads")]
+            HelpText ="Sets the number of concurrent threads")]
         public int numberOfWorkingThreads { get; set; }
 
         [Option ('c', "comppath",
             HelpText ="Path to the file with comparison results")]
         public string comparisonResultsFilePath { get; set; }
+
+        [Option('l', "logfile",
+            HelpText ="Sets the of the logging file in additon to logging to the Console")]
+        public string logFilePath { get; set; }
     }
 
     enum SFObjectsWithAttachments
