@@ -1,4 +1,5 @@
-﻿using CommandLine;
+﻿using AsyncSalesForceAttachments;
+using CommandLine;
 using KeePassLib;
 using KeePassLib.Collections;
 using KeePassLib.Interfaces;
@@ -6,7 +7,6 @@ using KeePassLib.Keys;
 using KeePassLib.Security;
 using KeePassLib.Serialization;
 using Newtonsoft.Json.Linq;
-using PS_Ids_Async;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -63,8 +63,7 @@ namespace SalesForceAttachmentsBackupTools
                     if (opt.logFilePath != null && !opt.logFilePath.Equals(String.Empty))
                     {
                         Trace.Listeners.Add(new TextWriterTraceListener(opt.logFilePath, "Backup_fileTracer"));
-                        Trace.Listeners["Backup_fileTracer"].TraceOutputOptions |=
-                            TraceOptions.DateTime | TraceOptions.ProcessId | TraceOptions.ThreadId;
+                        Trace.Listeners["Backup_fileTracer"].TraceOutputOptions |= TraceOptions.DateTime;
                     }
                     if (opt.logToConsole != 0) Trace.Listeners.Add(consoleTraceListener);
                     Trace.AutoFlush = true;
@@ -72,9 +71,8 @@ namespace SalesForceAttachmentsBackupTools
                     if (workingMode == WorkingModes.Compare && 
                         (opt.comparisonResultsFilePath == null || opt.comparisonResultsFilePath.Equals(String.Empty))) 
                     {
-                        Trace.TraceError($"If workmode is set to compare then comparison file must be provided." +
-                            $"\nWait for {waittime.Seconds} seconds or press any key to exit...");
-                        Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+                        Trace.TraceError($"If workmode is set to compare then comparison file must be provided.");
+                        WaitExitingCountdown();
                         Environment.Exit(-1);
                         return 0;
                     }
@@ -87,8 +85,7 @@ namespace SalesForceAttachmentsBackupTools
                 },
                 (IEnumerable<Error> errs) =>
                 {
-                    Console.WriteLine($"See logs. Wait for {waittime.Seconds} seconds or press any key to exit...");
-                    Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+                    WaitExitingCountdown();
                     Environment.Exit(-1);
                     return 0;
                 });
@@ -118,8 +115,8 @@ namespace SalesForceAttachmentsBackupTools
             Trace.TraceInformation($"Got {credentialsDict.Count} credentials");
             if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3)
             {
-                Trace.TraceError("Necessary cryptographic input is absent in the provided entry in the KDBX. Exiting...");
-                Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+                Trace.TraceError("Necessary cryptographic input is absent in the provided entry in the KDBX.");
+                WaitExitingCountdown();
                 return;
             }
 
@@ -127,7 +124,7 @@ namespace SalesForceAttachmentsBackupTools
             if (salesForceSID.Count == 0)
             {
                 Trace.TraceError("Error getting SalesForce session ID. Exiting...");
-                Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+                WaitExitingCountdown();
                 return;
             }
 
@@ -143,7 +140,7 @@ namespace SalesForceAttachmentsBackupTools
                     else
                     {
                         Trace.TraceError("Nothing to extract. Exiting...");
-                        Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+                        WaitExitingCountdown();
                         Environment.Exit(-2);
                     }
                     break;
@@ -152,7 +149,7 @@ namespace SalesForceAttachmentsBackupTools
                     if (!File.Exists(resultFileName))
                     {
                         Trace.TraceError("Source file does not exist. Exiting...");
-                        Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+                        WaitExitingCountdown();
                         Environment.Exit(-3);
                     }
                     break; ;
@@ -211,7 +208,7 @@ namespace SalesForceAttachmentsBackupTools
                     break;
             }
             Trace.TraceInformation("All threads complete");
-            Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
+            WaitExitingCountdown();
         }
         #endregion StartWorkers
 
@@ -258,7 +255,8 @@ namespace SalesForceAttachmentsBackupTools
                 Encoding.ASCII.GetBytes(salt), iterations, HashAlgorithmName.SHA256);
             return PasswordDeriveBytes.GetBytes(keySize / 8);
         }
-        static async Task<IEnumerable<string>> GetListOfIds(IDictionary<string, string> dic, string obj)
+
+        private static async Task<IEnumerable<string>> GetListOfIds(IDictionary<string, string> dic, string obj)
         {
             HttpResponseMessage listOfIds = new HttpResponseMessage();
             List<string> lst = new List<string>();
@@ -292,9 +290,9 @@ namespace SalesForceAttachmentsBackupTools
         }
 
         //A worker for Read mode
-        static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
-            SynchronizadIds psid = new SynchronizadIds();
+            SynchronizedIds psid = new SynchronizedIds();
             int currentId;
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
@@ -337,7 +335,7 @@ namespace SalesForceAttachmentsBackupTools
         }
 
         //A worker for Write mode
-        static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
+        private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
         {
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
@@ -409,9 +407,9 @@ namespace SalesForceAttachmentsBackupTools
         }
 
         //A worker for Compare mode
-        static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
+        private static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
-            SynchronizadIds psid = new SynchronizadIds();
+            SynchronizedIds psid = new SynchronizedIds();
             int currentId;
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
@@ -484,14 +482,15 @@ namespace SalesForceAttachmentsBackupTools
             }
             Trace.TraceInformation($"A worker {guid} has finished the work.");
         }
-        public static bool IsBase64String(string s)
+
+        private static bool IsBase64String(string s)
         {
             s = s.Trim();
             return (s.Length % 4 == 0) && Regex.IsMatch(s, @"^[a-zA-Z0-9\+/]*={0,3}$", RegexOptions.None);
 
         }
 
-        static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password)
+        private static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password)
         {
             PwDatabase PwDB = new PwDatabase();
             IOConnectionInfo mioInfo = new IOConnectionInfo();
@@ -540,7 +539,7 @@ namespace SalesForceAttachmentsBackupTools
             return dict;
         }
     
-        static async Task<IDictionary<string, string>> GetSalesForceSessionId(IDictionary<string, ProtectedString> creds)
+        private static async Task<IDictionary<string, string>> GetSalesForceSessionId(IDictionary<string, ProtectedString> creds)
         {
             string xmlString = @"<?xml version=""1.0"" encoding=""utf-8""?>
                   <env:Envelope xmlns:xsd=""http://www.w3.org/2001/XMLSchema""
@@ -626,7 +625,7 @@ namespace SalesForceAttachmentsBackupTools
             return dict;
         }
 
-        static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, IDictionary<string,string> dic, HttpMethod method, string content)
+        private static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, IDictionary<string,string> dic, HttpMethod method, string content)
         {
             HttpResponseMessage response = new HttpResponseMessage();
             List<string> lst = new List<string>();
@@ -653,6 +652,19 @@ namespace SalesForceAttachmentsBackupTools
                 Trace.TraceError(ex.Message);
             }
             return response;
+        }
+        
+        private static void WaitExitingCountdown()
+        {
+            int i = waittime.Seconds;
+            Task.Factory.StartNew(() =>
+            {
+                Timer timer = new Timer(new TimerCallback((e) =>
+                {
+                    Console.Write("\rWait for {0} seconds or press any key to exit...", (i--).ToString("D2"));
+                }), null, 1, 1000);
+            });
+            Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
         }
         #endregion Methods
     }
@@ -707,7 +719,7 @@ namespace SalesForceAttachmentsBackupTools
         public string logFilePath { get; set; }
 
         [Option('x',"logtoconsole", Default = 1,
-            HelpText ="Switches logging to Console mode on/off. Might be useful since doesn't waste time on UI output, though makes survey possible only through log file (if any provided).",
+            HelpText ="Switches logging to Console mode on(<>0)/off(0). Might be useful since it doesn't waste time on UI output, though makes survey possible only through log file (if any provided).",
             MetaValue = "1")]
         public int logToConsole { get; set; }
     }

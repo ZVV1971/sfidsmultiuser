@@ -4,23 +4,19 @@ using System.IO.MemoryMappedFiles;
 using System.Security;
 using System.Threading;
 
-namespace PS_Ids_Async
+namespace AsyncSalesForceAttachments
 {
-    public class SynchronizadIds
+    public class SynchronizedIds
     {
+        #region fields
         private static readonly string memMappedFileName = @"Local\PS_Ids";
-
         private static readonly long memMappedFileSize = 32;
-
         private static readonly MemoryMappedFile memMappedFile;
-
         private static readonly MemoryMappedViewAccessor memMappedFileAccessor;
-
-        private static readonly string memMutexName = "EPAM_NOVARTIS_ChineseData_Generation_Mutex";
-
+        private static readonly string memMutexName = "EPAM_NOVARTIS_Salesforce_Attachments_Mutex";
         private static Mutex memMutex;
-
-        static SynchronizadIds()
+        #endregion
+        static SynchronizedIds()
         {
             memMappedFile = MemoryMappedFile.CreateOrOpen(memMappedFileName, memMappedFileSize);
             memMappedFileAccessor = memMappedFile.CreateViewAccessor();
