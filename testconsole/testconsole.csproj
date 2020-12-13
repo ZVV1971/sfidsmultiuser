@@ -25,7 +25,7 @@
     <MapFileExtensions>true</MapFileExtensions>
     <OpenBrowserOnPublish>false</OpenBrowserOnPublish>
     <AutorunEnabled>true</AutorunEnabled>
-    <ApplicationRevision>30</ApplicationRevision>
+    <ApplicationRevision>35</ApplicationRevision>
     <ApplicationVersion>1.0.1.%2a</ApplicationVersion>
     <UseApplicationTrust>false</UseApplicationTrust>
     <PublishWizardCompleted>true</PublishWizardCompleted>

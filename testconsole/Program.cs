@@ -24,7 +24,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 
-namespace testconsole
+namespace SalesForceAttachmentsBackupTools
 {
     class AttachmentsBackup
     {
@@ -48,9 +48,6 @@ namespace testconsole
         [MTAThread]
         static async Task Main(string[] args)
         {
-            consoleTraceListener.TraceEvent(new TraceEventCache(), "AttachmentsBackup", TraceEventType.Information, 0);
-            Trace.Listeners.Add(consoleTraceListener);
-
             int result = Parser.Default.ParseArguments<Options>(args)
                 .MapResult(
                 (Options opt) =>
@@ -64,7 +61,16 @@ namespace testconsole
                         "encrypted_" + objectWithAttachments + ".dat" : opt.ecryptedAttachmentsTargetFile;
                     workingMode = opt.WorkMode;
                     numberOfThreads = opt.numberOfWorkingThreads;
-                    if(workingMode == WorkingModes.Compare && 
+                    if (opt.logFilePath != null && !opt.logFilePath.Equals(String.Empty))
+                    {
+                        Trace.Listeners.Add(new TextWriterTraceListener(opt.logFilePath, "Backup_fileTracer"));
+                        Trace.Listeners["Backup_fileTracer"].TraceOutputOptions |=
+                            TraceOptions.DateTime | TraceOptions.ProcessId | TraceOptions.ThreadId;
+                    }
+                    if (opt.logToConsole != 0) Trace.Listeners.Add(consoleTraceListener);
+                    Trace.AutoFlush = true;
+                    Trace.Listeners.Remove("Default");
+                    if (workingMode == WorkingModes.Compare && 
                         (opt.comparisonResultsFilePath == null || opt.comparisonResultsFilePath.Equals(String.Empty))) 
                     {
                         Trace.TraceError($"If workmode is set to compare then comparison file must be provided." +
@@ -77,16 +83,12 @@ namespace testconsole
                     {
                         pathToComparisonResults = opt.comparisonResultsFilePath;
                     }
-                    if(opt.logFilePath != null && !opt.logFilePath.Equals(String.Empty))
-                    {
-                        Trace.Listeners.Add(new TextWriterTraceListener(opt.logFilePath));
-                    }
                     Trace.TraceInformation("Arguments have been successfully parsed");
                     return 1;
                 },
                 (IEnumerable<Error> errs) =>
                 {
-                    Console.WriteLine("Wait for 5 seconds or press any key to exit...");
+                    Console.WriteLine("See logs. Wait for 5 seconds or press any key to exit...");
                     Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                     Environment.Exit(-1);
                     return 0;
@@ -114,10 +116,10 @@ namespace testconsole
             Console.WriteLine();
 
             Dictionary<string, ProtectedString> credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(securePwd));
-            Console.WriteLine($"Got {credentialsDict.Count} credentials");
+            Trace.TraceInformation($"Got {credentialsDict.Count} credentials");
             if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3)
             {
-                Console.WriteLine("Necessary cryptographic input is absent in the provided entry in the KDBX. Exiting...");
+                Trace.TraceError("Necessary cryptographic input is absent in the provided entry in the KDBX. Exiting...");
                 Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                 return;
             }
@@ -125,7 +127,7 @@ namespace testconsole
             Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(credentialsDict));
             if (salesForceSID.Count == 0)
             {
-                Console.WriteLine("Error getting SalesForce session ID. Exiting...");
+                Trace.TraceError("Error getting SalesForce session ID. Exiting...");
                 Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                 return;
             }
@@ -137,11 +139,11 @@ namespace testconsole
                     listOfIds = (await GetListOfIds(salesForceSID, objectWithAttachments)).ToList();
                     if (listOfIds.Count != 0)
                     {
-                        Console.WriteLine($"Got {listOfIds.Count} Ids in the {objectWithAttachments} object");
+                        Trace.TraceInformation($"Got {listOfIds.Count} Ids in the {objectWithAttachments} object");
                     }
                     else
                     {
-                        Console.WriteLine("Nothing to extract. Exiting...");
+                        Trace.TraceError("Nothing to extract. Exiting...");
                         Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                         Environment.Exit(-2);
                     }
@@ -150,7 +152,7 @@ namespace testconsole
                 case WorkingModes.Compare:
                     if (!File.Exists(resultFileName))
                     {
-                        Console.WriteLine("Source file does not exist. Exiting...");
+                        Trace.TraceError("Source file does not exist. Exiting...");
                         Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                         Environment.Exit(-3);
                     }
@@ -174,7 +176,7 @@ namespace testconsole
                 case WorkingModes.Read:
                     using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(resultFileName, false, Encoding.ASCII)))
                     {
-                        Console.WriteLine($"Initiating {numberOfThreads} workers to read data.");
+                        Trace.TraceInformation($"Initiating {numberOfThreads} workers to read data.");
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
@@ -186,7 +188,7 @@ namespace testconsole
                 case WorkingModes.Write:
                     minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
                     _ = FillQueue();
-                    Console.WriteLine($"Initiating {numberOfThreads} workers to write data.");
+                    Trace.TraceInformation($"Initiating {numberOfThreads} workers to write data.");
                     for (int i = 0; i < numberOfThreads; i++)
                     {
                         tasks.Add(Task.Run(
@@ -199,7 +201,7 @@ namespace testconsole
                     _ = FillQueue();
                     using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(pathToComparisonResults, false, Encoding.ASCII)))
                     {
-                        Console.WriteLine($"Initiating {numberOfThreads} workers to compare data.");
+                        Trace.TraceInformation($"Initiating {numberOfThreads} workers to compare data.");
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
@@ -209,7 +211,7 @@ namespace testconsole
                     }
                     break;
             }
-            Console.WriteLine("All threads complete");
+            Trace.TraceInformation("All threads complete");
             Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
         }
         #endregion
@@ -234,13 +236,13 @@ namespace testconsole
                         }
                         else if (reg.Match(line).Captures.Count == 0)
                         {
-                            Console.WriteLine($"Row #{i++} contains malformatted id");
+                            Trace.TraceWarning($"Row #{i++} contains malformatted id");
                             continue;
                         }
                         string[] strs = line.Split(',');
                         if (!IsBase64String(strs[1]))
                         {
-                            Console.WriteLine($"Row #{i++} contains malformatted Base64 body");
+                            Trace.TraceWarning($"Row #{i++} contains malformatted Base64 body");
                             continue;
                         }
                         minSizeQueue.Enqueue(new KeyValuePair<string, string>(strs[0], strs[1]));
@@ -268,8 +270,12 @@ namespace testconsole
             {
 
                 listOfIds = await ReadFromSalesForce(requestUri, dic, HttpMethod.Get, null);
-                
-                if (listOfIds.StatusCode != HttpStatusCode.OK) break;
+
+                if (listOfIds.StatusCode != HttpStatusCode.OK)
+                {
+                    Trace.TraceWarning("Request of Ids returned {0}", listOfIds.StatusCode);
+                    break;
+                }
 
                 var j = JObject.Parse(await listOfIds.Content.ReadAsStringAsync());
                 foreach (var v in j["records"])
@@ -289,10 +295,10 @@ namespace testconsole
         //A worker for Read mode
         static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
-            PowerShellId psid = new PowerShellId();
+            SynchronizadIds psid = new SynchronizadIds();
             int currentId;
             int currentThreadId = Thread.CurrentThread.ManagedThreadId;
-            Console.WriteLine($"A worker {currentThreadId} has started.");
+            Trace.TraceInformation($"A worker {currentThreadId} has started.");
             do
             {
                 currentId = psid.GetCurrentID();
@@ -305,7 +311,7 @@ namespace testconsole
                     {
                         using (MemoryStream ms = resp.Content.ReadAsStreamAsync().Result as MemoryStream)
                         {
-                            Console.WriteLine(
+                            Trace.TraceInformation(
                                   $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {ms.Length} bytes read by a thread #{currentThreadId}");
                             using (MemoryStream stream = new MemoryStream())
                             {
@@ -321,21 +327,21 @@ namespace testconsole
                     }
                     else
                     {
-                        Console.WriteLine($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the queue again");
+                        Trace.TraceError($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the queue again");
                         listOfIds.Append((listOfIds.ToList())[currentId]);
                     }
                     continue;
                 }
                 break;
             } while (true);
-            Console.WriteLine($"A worker {currentThreadId} has finished the work.");
+            Trace.TraceInformation($"A worker {currentThreadId} has finished the work.");
         }
 
         //A worker for Write mode
         static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
         {
             int currentThreadId = Thread.CurrentThread.ManagedThreadId;
-            Console.WriteLine($"A worker {currentThreadId} has started.");
+            Trace.TraceInformation($"A worker {currentThreadId} has started.");
             while (true) 
             {
                 KeyValuePair<string, string> att;
@@ -348,7 +354,7 @@ namespace testconsole
                     }
                     catch
                     {
-                        Console.WriteLine($"Error decoding Base64 value for {att.Key}");
+                        Trace.TraceError($"Error decoding Base64 value for {att.Key}");
                         continue;
                     }
                     if (valueBytes.Length > 0) 
@@ -372,28 +378,28 @@ namespace testconsole
                                             creds, new HttpMethod("PATCH"), json);
                                         if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
                                         {
-                                            Console.WriteLine($"{att.Key} has been successfully updated by {currentThreadId}.");
+                                            Trace.TraceInformation($"{att.Key} has been successfully updated by {currentThreadId}.");
                                         }
                                         else if (response.StatusCode == HttpStatusCode.NoContent)
                                         {
-                                            Console.WriteLine($"{att.Key}'s content has obviously been modified by {currentThreadId}, though \"no content\" has been returned.");
+                                            Trace.TraceInformation($"{att.Key}'s content has obviously been modified by {currentThreadId}, though \"no content\" has been returned.");
                                         }
                                         else
                                         {
-                                            Console.WriteLine($"{att.Key} failed to update by {currentThreadId}. {response?.StatusCode}");
+                                            Trace.TraceError($"{att.Key} failed to update by {currentThreadId}. {response?.StatusCode}");
                                         }
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    Console.WriteLine($"{ex.Message}\noccured while trying to update {att.Key} from {currentThreadId}");
+                                    Trace.TraceError($"{ex.Message}\noccured while trying to update {att.Key} from {currentThreadId}");
                                 }
                             }
                         } 
                     }
                     else
                     {
-                        Console.WriteLine($"{att.Key} didn't give any body for writing.");
+                        Trace.TraceError($"{att.Key} didn't give any body for writing.");
                     }
                 }
                 else 
@@ -402,14 +408,14 @@ namespace testconsole
                     break; 
                 }
             }
-            Console.WriteLine($"A worker {currentThreadId} has finished the work.");
+            Trace.TraceInformation($"A worker {currentThreadId} has finished the work.");
         }
 
         //A worker for Compare mode
         static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
-            Console.WriteLine($"A worker {Task.CurrentId} has started.");
-            PowerShellId psid = new PowerShellId();
+            Trace.TraceInformation($"A worker {Task.CurrentId} has started.");
+            SynchronizadIds psid = new SynchronizadIds();
             int currentId;
             int currentThreadId = Thread.CurrentThread.ManagedThreadId;
             while (true)
@@ -425,7 +431,7 @@ namespace testconsole
                     }
                     catch
                     {
-                        Console.WriteLine($"Error decoding Base64 value for {att.Key}");
+                        Trace.TraceError($"Error decoding Base64 value for {att.Key}");
                         continue;
                     }
                     if (valueBytes.Length > 0)
@@ -452,22 +458,22 @@ namespace testconsole
                                                 Array.Resize<byte>(ref decrypted, res.Length);
                                                 if (res.SequenceEqual(decrypted))
                                                 {
-                                                    Console.WriteLine($"#{currentId} - {att.Key} is Equal from {currentThreadId}.");
+                                                    Trace.TraceInformation($"#{currentId} - {att.Key} is Equal from {currentThreadId}.");
                                                     writer.WriteLine(att.Key + ",EQ");
                                                 }
-                                                else Console.WriteLine($"#{currentId} - {att.Key} is OK from {currentThreadId}.");
+                                                else Trace.TraceInformation($"#{currentId} - {att.Key} is OK from {currentThreadId}.");
                                             }
                                         }
                                         else
                                         {
-                                            Console.WriteLine($"#{currentId} - {att.Key} failed to read from {currentThreadId}.");
+                                            Trace.TraceWarning($"#{currentId} - {att.Key} failed to read from {currentThreadId}.");
                                             writer.WriteLine(att.Key + ",SF_ERROR");
                                         }
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    Console.WriteLine($"{ex.Message}\noccured while trying to compare {att.Key} from {currentThreadId}");
+                                    Trace.TraceError($"{ex.Message}\noccured while trying to compare {att.Key} from {currentThreadId}");
                                 }
                             }
                         }
@@ -479,7 +485,7 @@ namespace testconsole
                     break;
                 }
             }
-            Console.WriteLine($"A worker {currentThreadId} has finished the work.");
+            Trace.TraceInformation($"A worker {currentThreadId} has finished the work.");
         }
         public static bool IsBase64String(string s)
         {
@@ -526,7 +532,7 @@ namespace testconsole
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to open KeePassDb \n{ex.Message}");
+                Trace.TraceError($"Failed to open KeePassDb \n{ex.Message}");
             }
             finally
             {
@@ -580,22 +586,22 @@ namespace testconsole
 
             try
             {
-                Console.WriteLine("Sending a request to SF for log-in...");
+                Trace.TraceInformation("Sending a request to SF for log-in...");
                 HttpResponseMessage msg = await client.SendAsync(httpRequestMessage, HttpCompletionOption.ResponseHeadersRead);
                 if (msg.IsSuccessStatusCode)
                 {
-                    Console.WriteLine("Got successful login response");
+                    Trace.TraceInformation("Got successful login response");
                     x.LoadXml(msg.Content.ReadAsStringAsync().Result);
                 }
                 else
                 {
-                    Console.WriteLine("SalesForce login failed");
+                    Trace.TraceError("SalesForce login failed");
                     return new Dictionary<string, string>();
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine(ex.Message);
+                Trace.TraceError(ex.Message);
                 return new Dictionary<string, string>();
             }
 
@@ -616,7 +622,7 @@ namespace testconsole
                         break;
                     case "userInfo":
                         dict.Add("sessionSecondsValid", (n["sessionSecondsValid"]).InnerText);
-                        Console.WriteLine($"The session will be valid for {dict["sessionSecondsValid"]} seconds!");
+                        Trace.TraceInformation($"The session will be valid for {dict["sessionSecondsValid"]} seconds!");
                         break;
                 }
             }
@@ -647,11 +653,11 @@ namespace testconsole
             }
             catch (Exception ex)
             {
-                Console.WriteLine(ex.Message);
+                Trace.TraceError(ex.Message);
             }
             return response;
         }
-        #endregion
+        #endregion Methods
     }
 
     class Options
@@ -701,6 +707,10 @@ namespace testconsole
         [Option('l', "logfile",
             HelpText ="Sets the of the logging file in additon to logging to the Console")]
         public string logFilePath { get; set; }
+
+        [Option('x',"logtoconsole", Default = 1,
+            HelpText ="Switches logging to Console mode on/off")]
+        public int logToConsole { get; set; }
     }
 
     enum SFObjectsWithAttachments

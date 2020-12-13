@@ -6,7 +6,7 @@ using System.Threading;
 
 namespace PS_Ids_Async
 {
-    public class PowerShellId
+    public class SynchronizadIds
     {
         private static readonly string memMappedFileName = @"Local\PS_Ids";
 
@@ -20,7 +20,7 @@ namespace PS_Ids_Async
 
         private static Mutex memMutex;
 
-        static PowerShellId()
+        static SynchronizadIds()
         {
             memMappedFile = MemoryMappedFile.CreateOrOpen(memMappedFileName, memMappedFileSize);
             memMappedFileAccessor = memMappedFile.CreateViewAccessor();
