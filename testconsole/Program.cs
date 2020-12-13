@@ -5,7 +5,6 @@ using KeePassLib.Interfaces;
 using KeePassLib.Keys;
 using KeePassLib.Security;
 using KeePassLib.Serialization;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PS_Ids_Async;
 using System;
@@ -88,7 +87,7 @@ namespace SalesForceAttachmentsBackupTools
                 },
                 (IEnumerable<Error> errs) =>
                 {
-                    Console.WriteLine("See logs. Wait for 5 seconds or press any key to exit...");
+                    Console.WriteLine($"See logs. Wait for {waittime.Seconds} seconds or press any key to exit...");
                     Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
                     Environment.Exit(-1);
                     return 0;
@@ -214,7 +213,7 @@ namespace SalesForceAttachmentsBackupTools
             Trace.TraceInformation("All threads complete");
             Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
         }
-        #endregion
+        #endregion StartWorkers
 
         #region Methods
         private static Task FillQueue()
@@ -297,8 +296,8 @@ namespace SalesForceAttachmentsBackupTools
         {
             SynchronizadIds psid = new SynchronizadIds();
             int currentId;
-            int currentThreadId = Thread.CurrentThread.ManagedThreadId;
-            Trace.TraceInformation($"A worker {currentThreadId} has started.");
+            Guid guid = Guid.NewGuid();
+            Trace.TraceInformation($"A worker {guid} has started.");
             do
             {
                 currentId = psid.GetCurrentID();
@@ -312,7 +311,7 @@ namespace SalesForceAttachmentsBackupTools
                         using (MemoryStream ms = resp.Content.ReadAsStreamAsync().Result as MemoryStream)
                         {
                             Trace.TraceInformation(
-                                  $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {ms.Length} bytes read by a thread #{currentThreadId}");
+                                  $"Input #{currentId} with ID:{(listOfIds.ToList())[currentId]} has resulted in {ms.Length} bytes read by a thread #{guid}");
                             using (MemoryStream stream = new MemoryStream())
                             {
                                 using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Write))
@@ -334,14 +333,14 @@ namespace SalesForceAttachmentsBackupTools
                 }
                 break;
             } while (true);
-            Trace.TraceInformation($"A worker {currentThreadId} has finished the work.");
+            Trace.TraceInformation($"A worker {guid} has finished the work.");
         }
 
         //A worker for Write mode
         static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
         {
-            int currentThreadId = Thread.CurrentThread.ManagedThreadId;
-            Trace.TraceInformation($"A worker {currentThreadId} has started.");
+            Guid guid = Guid.NewGuid();
+            Trace.TraceInformation($"A worker {guid} has started.");
             while (true) 
             {
                 KeyValuePair<string, string> att;
@@ -371,28 +370,26 @@ namespace SalesForceAttachmentsBackupTools
                                     if (bytesRead > 0)
                                     {
                                         string decryptedValue = Convert.ToBase64String(decrypted);
-                                        Attachment attachment = new Attachment();
-                                        attachment.Body = decryptedValue;
-                                        string json = JsonConvert.SerializeObject(attachment);
+                                        string json = "{\"Body\":\"" + decryptedValue +"\"}"; // JsonConvert.SerializeObject(attachment);
                                         HttpResponseMessage response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key),
                                             creds, new HttpMethod("PATCH"), json);
                                         if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
                                         {
-                                            Trace.TraceInformation($"{att.Key} has been successfully updated by {currentThreadId}.");
+                                            Trace.TraceInformation($"{att.Key} has been successfully updated by {guid}.");
                                         }
                                         else if (response.StatusCode == HttpStatusCode.NoContent)
                                         {
-                                            Trace.TraceInformation($"{att.Key}'s content has obviously been modified by {currentThreadId}, though \"no content\" has been returned.");
+                                            Trace.TraceInformation($"{att.Key}'s content has obviously been modified by {guid}, though \"no content\" has been returned.");
                                         }
                                         else
                                         {
-                                            Trace.TraceError($"{att.Key} failed to update by {currentThreadId}. {response?.StatusCode}");
+                                            Trace.TraceError($"{att.Key} failed to update by {guid}. {response?.StatusCode}");
                                         }
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    Trace.TraceError($"{ex.Message}\noccured while trying to update {att.Key} from {currentThreadId}");
+                                    Trace.TraceError($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
                                 }
                             }
                         } 
@@ -408,16 +405,16 @@ namespace SalesForceAttachmentsBackupTools
                     break; 
                 }
             }
-            Trace.TraceInformation($"A worker {currentThreadId} has finished the work.");
+            Trace.TraceInformation($"A worker {guid} has finished the work.");
         }
 
         //A worker for Compare mode
         static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
-            Trace.TraceInformation($"A worker {Task.CurrentId} has started.");
             SynchronizadIds psid = new SynchronizadIds();
             int currentId;
-            int currentThreadId = Thread.CurrentThread.ManagedThreadId;
+            Guid guid = Guid.NewGuid();
+            Trace.TraceInformation($"A worker {guid} has started.");
             while (true)
             {
                 currentId = psid.GetCurrentID();
@@ -458,22 +455,22 @@ namespace SalesForceAttachmentsBackupTools
                                                 Array.Resize<byte>(ref decrypted, res.Length);
                                                 if (res.SequenceEqual(decrypted))
                                                 {
-                                                    Trace.TraceInformation($"#{currentId} - {att.Key} is Equal from {currentThreadId}.");
+                                                    Trace.TraceInformation($"#{currentId} - {att.Key} is Equal from {guid}.");
                                                     writer.WriteLine(att.Key + ",EQ");
                                                 }
-                                                else Trace.TraceInformation($"#{currentId} - {att.Key} is OK from {currentThreadId}.");
+                                                else Trace.TraceInformation($"#{currentId} - {att.Key} is OK from {guid}.");
                                             }
                                         }
                                         else
                                         {
-                                            Trace.TraceWarning($"#{currentId} - {att.Key} failed to read from {currentThreadId}.");
+                                            Trace.TraceWarning($"#{currentId} - {att.Key} failed to read from {guid}.");
                                             writer.WriteLine(att.Key + ",SF_ERROR");
                                         }
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    Trace.TraceError($"{ex.Message}\noccured while trying to compare {att.Key} from {currentThreadId}");
+                                    Trace.TraceError($"{ex.Message}\noccured while trying to compare {att.Key} from {guid}");
                                 }
                             }
                         }
@@ -485,7 +482,7 @@ namespace SalesForceAttachmentsBackupTools
                     break;
                 }
             }
-            Trace.TraceInformation($"A worker {currentThreadId} has finished the work.");
+            Trace.TraceInformation($"A worker {guid} has finished the work.");
         }
         public static bool IsBase64String(string s)
         {
@@ -671,45 +668,47 @@ namespace SalesForceAttachmentsBackupTools
         public WorkingModes WorkMode { get; set; }
 
         [Option('d', "salesforcedomain",
-            Default = "test",
-            HelpText = "Represents a domain used to log into SalesForce from, e.g. https://test.salesforce.com",
-            MetaValue = "test")]
+            Default = "test", MetaValue = "test",
+            HelpText = "Represents a domain used to log into SalesForce from, e.g. https://test.salesforce.com")]
         public string SalesForceDomain { get; set; }
 
-        [Option('g', "groupname", Required = true,
+        [Option('g', "groupname", Required = true, MetaValue ="EPAM",
             HelpText = "Gives the name of the group in the KeePass file where to look for the entry")]
         public string GroupName { get; set; }
 
-        [Option('e', "entryname", Required = true,
+        [Option('e', "entryname", Required = true, MetaValue = "EPAM",
             HelpText = "Gives the name of the Entry within the group in the KeePass file with necessary credentials")]
         public string EntryName { get; set; }
 
         [Option('k', "kdbxpath", Required = true,
-            HelpText = "Sets path to the KeePass file with the credentials. The file must not be key-file protected!")]
+            HelpText = "Sets the path to the KeePass file with the credentials. The file must not be key-file protected!")]
         public string KDBXPath { get; set; }
 
         [Option('o', "sfobject", Default = SFObjectsWithAttachments.Document,
-            HelpText ="Points out which SalesForce object the body of attachments should be taken from")]
+            HelpText ="Points out which SalesForce object the body of attachments should be taken from",
+            MetaValue ="Document")]
         public SFObjectsWithAttachments SFObject { get; set; }
 
         [Option('t',"targetfile",
-            HelpText ="Sets path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
+            HelpText ="Sets the path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
         public string ecryptedAttachmentsTargetFile { get; set; }
 
-        [Option('n',"threads", Default = 2,
+        [Option('n',"threads", Default = 2, MetaValue ="2",
             HelpText ="Sets the number of concurrent threads")]
         public int numberOfWorkingThreads { get; set; }
 
         [Option ('c', "comppath",
-            HelpText ="Path to the file with comparison results")]
+            HelpText ="Sets path to the file with comparison results",
+            MetaValue ="D:\\Doc_comp_res.dat")]
         public string comparisonResultsFilePath { get; set; }
 
         [Option('l', "logfile",
-            HelpText ="Sets the of the logging file in additon to logging to the Console")]
+            HelpText ="Sets the path to the logging file in additon to logging to the Console")]
         public string logFilePath { get; set; }
 
         [Option('x',"logtoconsole", Default = 1,
-            HelpText ="Switches logging to Console mode on/off")]
+            HelpText ="Switches logging to Console mode on/off. Might be useful since doesn't waste time on UI output, though makes survey possible only through log file (if any provided).",
+            MetaValue = "1")]
         public int logToConsole { get; set; }
     }
 
@@ -724,10 +723,5 @@ namespace SalesForceAttachmentsBackupTools
         Read,
         Write,
         Compare
-    }
-
-    public class Attachment
-    {
-        public string Body;
     }
 }
