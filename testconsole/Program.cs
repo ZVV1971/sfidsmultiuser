@@ -260,9 +260,17 @@ namespace SalesForceAttachmentsBackupTools
         {
             HttpResponseMessage listOfIds = new HttpResponseMessage();
             List<string> lst = new List<string>();
-            
-            Uri requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj);
-            
+            Uri requestUri = null;
+
+            try
+            {
+                requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj);
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceError(ex.Message + "\n from GetListofIds");
+            }
+
             while (true)
             {
 
@@ -280,11 +288,19 @@ namespace SalesForceAttachmentsBackupTools
                     lst.Add(v["Id"].ToString());
                 }
 
-                if (j["nextRecordsUrl"] != null)
+                try
                 {
-                    requestUri = new Uri(j["nextRecordsUrl"].ToString());
+                    if (j["nextRecordsUrl"] != null)
+                    {
+                        requestUri = new Uri(dic["serverUrl"] + "/query" + j["nextRecordsUrl"].ToString().Substring(j["nextRecordsUrl"].ToString().LastIndexOf('/')));
+                        Trace.TraceInformation(requestUri.ToString());
+                    }
+                    else break;
                 }
-                else break;
+                catch (Exception ex)
+                {
+                    Trace.TraceError(ex.Message + "\n" + dic["serverUrl"]);
+                }
             }
             return lst;
         }
@@ -296,14 +312,23 @@ namespace SalesForceAttachmentsBackupTools
             int currentId;
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
+            HttpResponseMessage resp = null;
             do
             {
                 currentId = psid.GetCurrentID();
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
-                    HttpResponseMessage resp = await ReadFromSalesForce(
-                        new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + (listOfIds.ToList())[currentId] + "/Body")
-                        , creds, HttpMethod.Get, null);
+                    try
+                    {
+                        resp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + (listOfIds.ToList())[currentId] + "/Body")
+                            , creds, HttpMethod.Get, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceError("An exception occured while working in read mode.\n" +
+                            ex.Message);
+                    }
+
                     if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
                     {
                         using (MemoryStream ms = resp.Content.ReadAsStreamAsync().Result as MemoryStream)
@@ -339,6 +364,7 @@ namespace SalesForceAttachmentsBackupTools
         {
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
+            HttpResponseMessage response = null;
             while (true) 
             {
                 KeyValuePair<string, string> att;
@@ -368,9 +394,18 @@ namespace SalesForceAttachmentsBackupTools
                                     if (bytesRead > 0)
                                     {
                                         string decryptedValue = Convert.ToBase64String(decrypted);
-                                        string json = "{\"Body\":\"" + decryptedValue +"\"}"; // JsonConvert.SerializeObject(attachment);
-                                        HttpResponseMessage response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key),
-                                            creds, new HttpMethod("PATCH"), json);
+                                        string json = "{\"Body\":\"" + decryptedValue +"\"}";
+                                        try
+                                        {
+                                            response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key),
+                                                creds, new HttpMethod("PATCH"), json);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Trace.TraceError("An exception occured while working in write mode.\n" +
+                                                ex.Message);
+                                        }
+
                                         if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
                                         {
                                             Trace.TraceInformation($"{att.Key} has been successfully updated by {guid}.");
@@ -417,6 +452,8 @@ namespace SalesForceAttachmentsBackupTools
             {
                 currentId = psid.GetCurrentID();
                 KeyValuePair<string, string> att;
+                HttpResponseMessage response = null;
+
                 if (minSizeQueue.TryDequeue(out att))
                 {
                     byte[] valueBytes = null;
@@ -442,8 +479,17 @@ namespace SalesForceAttachmentsBackupTools
                                     if (bytesRead > 0)
                                     {
                                         string decryptedValue = Convert.ToBase64String(decrypted);
-                                        HttpResponseMessage response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key + "/Body"),
-                                            creds, HttpMethod.Get, null);
+                                        try
+                                        {
+                                            response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key + "/Body"),
+                                                creds, HttpMethod.Get, null);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Trace.TraceError("An error occured while working in Compare mode.\n" +
+                                                ex.Message);
+                                        }
+
                                         if(response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
                                         {
                                             using (MemoryStream ms = new MemoryStream())
@@ -564,7 +610,8 @@ namespace SalesForceAttachmentsBackupTools
                         n.FirstChild.InnerText = creds["UserName"].ReadString();
                         break;
                     case "password":
-                        n.FirstChild.InnerText = creds["Password"].ReadString() + creds["SecurityToken"].ReadString();
+                        n.FirstChild.InnerText = creds["Password"].ReadString() +
+                            (creds.ContainsKey("SecurityToken") ? creds["SecurityToken"].ReadString():"");
                         break;
                 }
             }
@@ -612,9 +659,10 @@ namespace SalesForceAttachmentsBackupTools
                             //substitute Soap/u with data/v45
                             Regex.Replace(n.FirstChild.InnerText.Substring(0, n.FirstChild.InnerText.LastIndexOf('/')), 
                             @"(Soap/u/)([\d\.]+)", "data/v$2"));
+                        Trace.TraceInformation(dict["serverUrl"]);
                         break;
                     case "sessionId":
-                        dict.Add("sessionId",n.FirstChild.InnerText);
+                        dict.Add("sessionId", n.FirstChild.InnerText);
                         break;
                     case "userInfo":
                         dict.Add("sessionSecondsValid", (n["sessionSecondsValid"]).InnerText);
