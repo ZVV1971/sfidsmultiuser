@@ -35,6 +35,7 @@ namespace SalesForceAttachmentsBackupTools
         private static string objectWithAttachments;
         private static string resultFileName;
         private static string pathToComparisonResults;
+        private static string filter;
         private static int numberOfThreads;
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
@@ -79,6 +80,10 @@ namespace SalesForceAttachmentsBackupTools
                     else
                     {
                         pathToComparisonResults = opt.comparisonResultsFilePath;
+                        if (workingMode == WorkingModes.Read)
+                        {
+                            filter = opt.readModeFilter;
+                        }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
                     return 1;
@@ -264,7 +269,8 @@ namespace SalesForceAttachmentsBackupTools
 
             try
             {
-                requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj);
+                string modifiedFilter = "+WHERE+" + filter.Replace(' ','+') ?? String.Empty;
+                requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj + modifiedFilter);
             }
             catch (Exception ex)
             {
@@ -770,6 +776,10 @@ namespace SalesForceAttachmentsBackupTools
             HelpText ="Switches logging to Console mode on(<>0)/off(0). Might be useful since it doesn't waste time on UI output, though makes survey possible only through log file (if any provided).",
             MetaValue = "1")]
         public int logToConsole { get; set; }
+
+        [Option('f',"filter",Default ="",
+            HelpText ="Takes a filter when running in the \"Read\" mode")]
+        public string readModeFilter { get; set; }
     }
 
     enum SFObjectsWithAttachments
