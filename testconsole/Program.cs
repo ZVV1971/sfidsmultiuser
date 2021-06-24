@@ -1,5 +1,6 @@
 ﻿using AsyncSalesForceAttachments;
 using CommandLine;
+using CommandLine.Text;
 using KeePassLib;
 using KeePassLib.Collections;
 using KeePassLib.Interfaces;
@@ -22,6 +23,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
+using System.Linq;
 
 namespace SalesForceAttachmentsBackupTools
 {
@@ -82,7 +84,7 @@ namespace SalesForceAttachmentsBackupTools
                         pathToComparisonResults = opt.comparisonResultsFilePath;
                         if (workingMode == WorkingModes.Read)
                         {
-                            filter = opt.readModeFilter;
+                            filter = "" ?? "+WHERE+" + opt.readModeFilter.Aggregate((i,j)=> i + "+AND+" + j);
                         }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
@@ -269,8 +271,7 @@ namespace SalesForceAttachmentsBackupTools
 
             try
             {
-                string modifiedFilter = "+WHERE+" + filter.Replace(' ','+') ?? String.Empty;
-                requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj + modifiedFilter);
+                requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj + filter);
             }
             catch (Exception ex)
             {
@@ -779,7 +780,7 @@ namespace SalesForceAttachmentsBackupTools
 
         [Option('f',"filter",Default ="",
             HelpText ="Takes a filter when running in the \"Read\" mode")]
-        public string readModeFilter { get; set; }
+        public IEnumerable<string> readModeFilter { get; set; }
     }
 
     enum SFObjectsWithAttachments
