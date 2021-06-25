@@ -1,12 +1,12 @@
 ﻿using AsyncSalesForceAttachments;
 using CommandLine;
-using CommandLine.Text;
 using KeePassLib;
 using KeePassLib.Collections;
 using KeePassLib.Interfaces;
 using KeePassLib.Keys;
 using KeePassLib.Security;
 using KeePassLib.Serialization;
+using KeePassLib.Cryptography.PasswordGenerator;
 using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
@@ -23,7 +23,6 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
-using System.Linq;
 
 namespace SalesForceAttachmentsBackupTools
 {
@@ -126,7 +125,12 @@ namespace SalesForceAttachmentsBackupTools
                 WaitExitingCountdown();
                 return;
             }
-
+            else if (workingMode == WorkingModes.Prepare)
+            {
+                Trace.TraceInformation("Preparation of KDBX has been successfully completed");
+                WaitExitingCountdown();
+                return;
+            }
             Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(credentialsDict));
             if (salesForceSID.Count == 0)
             {
@@ -558,22 +562,78 @@ namespace SalesForceAttachmentsBackupTools
             {
                 PwDB.Open(mioInfo, compositeKey, statusLogger);
                 PwObjectList<PwGroup> groups = PwDB.RootGroup.GetGroups(true);
-                
-                foreach(PwGroup grp in groups)
+
+                if (workingMode == WorkingModes.Prepare)
                 {
-                    if (grp.Name.Equals(groupName))
+                // Check whether the requested group already exists
+                    if (!groups.Any(x => x.Name.Equals(groupName)))
                     {
-                        PwObjectList<PwEntry> entries = grp.GetEntries(false);
-                        foreach (PwEntry ent in entries)
+                        PwDB.RootGroup.AddGroup(new PwGroup() { Name = groupName }, true);
+                        Trace.TraceInformation($"The Group {groupName} has been added to KeePass DB");
+                    }
+                    PwGroup grp = PwDB.RootGroup.GetGroups(true).Where(x => x.Name.Equals(groupName)).First();
+                // Check if the required entry doesn't exist in the group
+                    if (!grp.GetEntries(false).Any(x => x.Strings.ReadSafe("Title").Equals(entryName)))
+                    {
+                        ProtectedStringDictionary d = new ProtectedStringDictionary();
+                        d.Set("Title", new ProtectedString(true, entryName));
+                        grp.AddEntry(new PwEntry(grp, true, true) { Strings = d }, true);
+                        Trace.TraceInformation($"The Entry {entryName} has been added to KeePass DB");
+                    }
+                    PwEntry ent= grp.GetEntries(false).Where(x => x.Strings.ReadSafe("Title").Equals(entryName)).First();
+                    ProtectedString aesPwd = new ProtectedString();
+                    PwGenerator.Generate(out aesPwd, new PwProfile()
+                    {
+                        Length = 16,
+                        CharSet = new PwCharSet(PwCharSet.LowerCase + PwCharSet.UpperCase + PwCharSet.Digits + PwCharSet.PrintableAsciiSpecial)
+                    },
+                            UTF8Encoding.UTF8.GetBytes("sdfdsfKf44056k_1@"),
+                            new CustomPwGeneratorPool());
+                    ProtectedString salt = new ProtectedString();
+                    PwGenerator.Generate(out salt, new PwProfile()
+                    {
+                        Length = 26,
+                        CharSet = new PwCharSet(PwCharSet.LowerCase + PwCharSet.UpperCase + PwCharSet.Digits + PwCharSet.PrintableAsciiSpecial)
+                    },
+                            UTF8Encoding.UTF8.GetBytes(@"s_df-ds\/8&fK3f#4$4@05!6k_1@"),
+                            new CustomPwGeneratorPool());
+                    ent.Strings.Set("AESpassword", new ProtectedString(true, aesPwd.ReadString()));
+                    Trace.TraceInformation($"The value of the AESPass in the Entry {entryName} has been added to KeePass DB");
+                    ent.Strings.Set("Salt", new ProtectedString(true, salt.ReadString()));
+                    Trace.TraceInformation($"The value of the Salt in the Entry {entryName} has been added to KeePass DB");
+                    // Create IV
+                    SymmetricAlgorithm cipher = SymmetricAlgorithm.Create("AesManaged");
+                    cipher.Mode = CipherMode.CBC;
+                    cipher.Padding = PaddingMode.PKCS7;
+                    ent.Strings.Set("IV", new ProtectedString(true, Convert.ToBase64String(cipher.IV)));
+                    Trace.TraceInformation($"The value of the IV in the Entry {entryName} has been added to KeePass DB");
+                    PwDB.Save(statusLogger);
+                    // Add dummy values to the dictionary to pass the check
+                    dict.Add("Salt", new ProtectedString(true, ent.Strings.ReadSafe("Salt")));
+                    dict.Add("Password", new ProtectedString(true, "dummy"));
+                    dict.Add("AESPass", new ProtectedString(true, ent.Strings.ReadSafe("AESpassword")));
+                    dict.Add("UserName", new ProtectedString(true, "dummy"));
+                    dict.Add("IV", new ProtectedString(true, ent.Strings.ReadSafe("IV")));
+                    dict.Add("SecurityToken", new ProtectedString(true, "dummy"));
+                }
+                else
+                {
+                    foreach (PwGroup grp in groups)
+                    {
+                        if (grp.Name.Equals(groupName))
                         {
-                            if (ent.Strings.ReadSafe("Title").Equals(entryName))
+                            PwObjectList<PwEntry> entries = grp.GetEntries(false);
+                            foreach (PwEntry ent in entries)
                             {
-                                dict.Add("Salt", new ProtectedString(true, ent.Strings.ReadSafe("Salt")));
-                                dict.Add("Password", new ProtectedString(true, ent.Strings.ReadSafe("Password")));
-                                dict.Add("AESPass", new ProtectedString(true, ent.Strings.ReadSafe("AESpassword")));
-                                dict.Add("UserName", new ProtectedString(true, ent.Strings.ReadSafe("UserName")));
-                                dict.Add("IV", new ProtectedString(true, ent.Strings.ReadSafe("IV")));
-                                dict.Add("SecurityToken", new ProtectedString(true, ent.Strings.ReadSafe("SecurityToken")));
+                                if (ent.Strings.ReadSafe("Title").Equals(entryName))
+                                {
+                                    dict.Add("Salt", new ProtectedString(true, ent.Strings.ReadSafe("Salt")));
+                                    dict.Add("Password", new ProtectedString(true, ent.Strings.ReadSafe("Password")));
+                                    dict.Add("AESPass", new ProtectedString(true, ent.Strings.ReadSafe("AESpassword")));
+                                    dict.Add("UserName", new ProtectedString(true, ent.Strings.ReadSafe("UserName")));
+                                    dict.Add("IV", new ProtectedString(true, ent.Strings.ReadSafe("IV")));
+                                    dict.Add("SecurityToken", new ProtectedString(true, ent.Strings.ReadSafe("SecurityToken")));
+                                }
                             }
                         }
                     }
@@ -730,7 +790,9 @@ namespace SalesForceAttachmentsBackupTools
         [Option('m', "workmode",
             Default = WorkingModes.Read,
             HelpText ="Set the working mode.\nRead - to read the data from the SF org and store them into a file;" +
-            "\nwrite - to read the data from encrypted file and store them back into the SF org;\ncompare - to compare the data from the encrypted file and SF org.")]
+            "\nWrite - to read the data from encrypted file and store them back into the SF org;"+
+            "\nCompare - to compare the data from the encrypted file and SF org;" +
+            "\nPrepare - to prepare Crypto stuff in the given KDBX file (AESPassword, Salt and IV)")]
 
         public WorkingModes WorkMode { get; set; }
 
@@ -778,8 +840,9 @@ namespace SalesForceAttachmentsBackupTools
             MetaValue = "1")]
         public int logToConsole { get; set; }
 
-        [Option('f',"filter",Default ="",
-            HelpText ="Takes a filter when running in the \"Read\" mode")]
+        [Option('f',"filter", Default = null,
+            HelpText ="Takes a filter when running in the \"Read\" mode",
+            MetaValue = "Id=Adfd000werwer")]
         public IEnumerable<string> readModeFilter { get; set; }
     }
 
@@ -793,6 +856,7 @@ namespace SalesForceAttachmentsBackupTools
     {
         Read,
         Write,
-        Compare
+        Compare,
+        Prepare
     }
 }
