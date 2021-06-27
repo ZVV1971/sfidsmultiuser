@@ -111,7 +111,11 @@ namespace SalesForceAttachmentsBackupTools
                 }
                 else
                 {
-                    if (securePwd.Length > 0) securePwd.RemoveAt(securePwd.Length - 1);
+                    if (securePwd.Length > 0) 
+                    { 
+                        securePwd.RemoveAt(securePwd.Length - 1);
+                        Console.Write("\b \b");
+                    }
                 }
                 // Exit if Enter key is pressed.
             } while (key.Key != ConsoleKey.Enter);
@@ -238,6 +242,7 @@ namespace SalesForceAttachmentsBackupTools
                         line = reader.ReadLine();
                         if (line == null)
                         {
+                            //Completes the loading of the queue and notifies it to close if all its workers have finished
                             minSizeQueue.Close();
                             break;
                         }
@@ -267,6 +272,12 @@ namespace SalesForceAttachmentsBackupTools
             return PasswordDeriveBytes.GetBytes(keySize / 8);
         }
 
+        /// <summary>
+        /// Gets the list of IDs from the SF org's object obj
+        /// </summary>
+        /// <param name="dic">Contains necessary stuff to connect to the SF org</param>
+        /// <param name="obj">Contains the name of the object</param>
+        /// <returns></returns>
         private static async Task<IEnumerable<string>> GetListOfIds(IDictionary<string, string> dic, string obj)
         {
             HttpResponseMessage listOfIds = new HttpResponseMessage();
