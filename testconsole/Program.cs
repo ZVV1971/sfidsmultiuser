@@ -58,32 +58,32 @@ namespace SalesForceAttachmentsBackupTools
                     entryName = opt.EntryName;
                     pathToKeePassDb = opt.KDBXPath;
                     objectWithAttachments = Enum.GetName(typeof(SFObjectsWithAttachments), opt.SFObject);
-                    resultFileName = opt.ecryptedAttachmentsTargetFile == null ?
-                        "encrypted_" + objectWithAttachments + ".dat" : opt.ecryptedAttachmentsTargetFile;
+                    resultFileName = opt.EcryptedAttachmentsTargetFile == null ?
+                        "encrypted_" + objectWithAttachments + ".dat" : opt.EcryptedAttachmentsTargetFile;
                     workingMode = opt.WorkMode;
-                    numberOfThreads = opt.numberOfWorkingThreads;
-                    if (opt.logFilePath != null && !opt.logFilePath.Equals(String.Empty))
+                    numberOfThreads = opt.NumberOfWorkingThreads;
+                    if (opt.LogFilePath != null && !opt.LogFilePath.Equals(String.Empty))
                     {
-                        Trace.Listeners.Add(new TextWriterTraceListener(opt.logFilePath, "Backup_fileTracer"));
+                        Trace.Listeners.Add(new TextWriterTraceListener(opt.LogFilePath, "Backup_fileTracer"));
                         Trace.Listeners["Backup_fileTracer"].TraceOutputOptions |= TraceOptions.DateTime;
                     }
-                    if (opt.logToConsole != 0) Trace.Listeners.Add(consoleTraceListener);
+                    if (opt.LogToConsole != 0) Trace.Listeners.Add(consoleTraceListener);
                     Trace.AutoFlush = true;
                     Trace.Listeners.Remove("Default");
                     if (workingMode == WorkingModes.Compare && 
-                        (opt.comparisonResultsFilePath == null || opt.comparisonResultsFilePath.Equals(String.Empty))) 
+                        (opt.ComparisonResultsFilePath == null || opt.ComparisonResultsFilePath.Equals(String.Empty))) 
                     {
                         Trace.TraceError($"If workmode is set to compare then comparison file must be provided.");
-                        WaitExitingCountdown();
+                        WaitExitingCountdown(waittime);
                         Environment.Exit(-1);
                         return 0;
                     }
                     else
                     {
-                        pathToComparisonResults = opt.comparisonResultsFilePath;
+                        pathToComparisonResults = opt.ComparisonResultsFilePath;
                         if (workingMode == WorkingModes.Read)
                         {
-                            filter = "" ?? "+WHERE+" + opt.readModeFilter.Aggregate((i,j)=> i + "+AND+" + j);
+                            filter = "+WHERE+" + opt.ReadModeFilter.Aggregate((i,j)=> i + "+AND+" + j) ?? "";
                         }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
@@ -91,7 +91,7 @@ namespace SalesForceAttachmentsBackupTools
                 },
                 (IEnumerable<Error> errs) =>
                 {
-                    WaitExitingCountdown();
+                    WaitExitingCountdown(waittime);
                     Environment.Exit(-1);
                     return 0;
                 });
@@ -122,20 +122,20 @@ namespace SalesForceAttachmentsBackupTools
             if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3)
             {
                 Trace.TraceError("Necessary cryptographic input is absent in the provided entry in the KDBX.");
-                WaitExitingCountdown();
+                WaitExitingCountdown(waittime);
                 return;
             }
             else if (workingMode == WorkingModes.Prepare)
             {
                 Trace.TraceInformation("Preparation of KDBX has been successfully completed");
-                WaitExitingCountdown();
+                WaitExitingCountdown(waittime);
                 return;
             }
             Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(credentialsDict));
             if (salesForceSID.Count == 0)
             {
                 Trace.TraceError("Error getting SalesForce session ID. Exiting...");
-                WaitExitingCountdown();
+                WaitExitingCountdown(waittime);
                 return;
             }
 
@@ -151,7 +151,7 @@ namespace SalesForceAttachmentsBackupTools
                     else
                     {
                         Trace.TraceError("Nothing to extract. Exiting...");
-                        WaitExitingCountdown();
+                        WaitExitingCountdown(waittime);
                         Environment.Exit(-2);
                     }
                     break;
@@ -160,7 +160,7 @@ namespace SalesForceAttachmentsBackupTools
                     if (!File.Exists(resultFileName))
                     {
                         Trace.TraceError("Source file does not exist. Exiting...");
-                        WaitExitingCountdown();
+                        WaitExitingCountdown(waittime);
                         Environment.Exit(-3);
                     }
                     break; ;
@@ -219,7 +219,7 @@ namespace SalesForceAttachmentsBackupTools
                     break;
             }
             Trace.TraceInformation("All threads complete");
-            WaitExitingCountdown();
+            WaitExitingCountdown(waittime);
         }
         #endregion StartWorkers
 
@@ -276,6 +276,7 @@ namespace SalesForceAttachmentsBackupTools
             try
             {
                 requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj + filter);
+                Trace.TraceInformation($"Uri to get Ids {requestUri}");
             }
             catch (Exception ex)
             {
@@ -550,8 +551,10 @@ namespace SalesForceAttachmentsBackupTools
         private static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password)
         {
             PwDatabase PwDB = new PwDatabase();
-            IOConnectionInfo mioInfo = new IOConnectionInfo();
-            mioInfo.Path = pathToKeePassDb;
+            IOConnectionInfo mioInfo = new IOConnectionInfo
+            {
+                Path = pathToKeePassDb
+            };
             CompositeKey compositeKey = new CompositeKey();
             compositeKey.AddUserKey(new KcpPassword(Marshal.PtrToStringAuto(Marshal.SecureStringToBSTR(Password))));
             IStatusLogger statusLogger = new NullStatusLogger();
@@ -575,40 +578,54 @@ namespace SalesForceAttachmentsBackupTools
                 // Check if the required entry doesn't exist in the group
                     if (!grp.GetEntries(false).Any(x => x.Strings.ReadSafe("Title").Equals(entryName)))
                     {
+                        //Need to have a local variable for Protected dic
+                        //otherwise the clause becomes too complecated for reading
                         ProtectedStringDictionary d = new ProtectedStringDictionary();
                         d.Set("Title", new ProtectedString(true, entryName));
+#pragma warning disable CS0618 // Type or member is obsolete
+                        //They tell it is obsolete and recommend to use any other constructor,
+                        //but, actually, there's no other to be used.
                         grp.AddEntry(new PwEntry(grp, true, true) { Strings = d }, true);
+#pragma warning restore CS0618 // Type or member is obsolete
                         Trace.TraceInformation($"The Entry {entryName} has been added to KeePass DB");
                     }
                     PwEntry ent= grp.GetEntries(false).Where(x => x.Strings.ReadSafe("Title").Equals(entryName)).First();
+                //Create a value for password
                     ProtectedString aesPwd = new ProtectedString();
                     PwGenerator.Generate(out aesPwd, new PwProfile()
-                    {
-                        Length = 16,
-                        CharSet = new PwCharSet(PwCharSet.LowerCase + PwCharSet.UpperCase + PwCharSet.Digits + PwCharSet.PrintableAsciiSpecial)
-                    },
-                            UTF8Encoding.UTF8.GetBytes("sdfdsfKf44056k_1@"),
+                        {
+                            Length = 16,
+                            CharSet = new PwCharSet(PwCharSet.LowerCase + 
+                                                    PwCharSet.UpperCase + 
+                                                    PwCharSet.Digits + 
+                                                    PwCharSet.PrintableAsciiSpecial)
+                        },
+                            UTF8Encoding.UTF8.GetBytes(RndString.GetRandomString(16)),
                             new CustomPwGeneratorPool());
+                //Create a vlaue for Salt
                     ProtectedString salt = new ProtectedString();
                     PwGenerator.Generate(out salt, new PwProfile()
-                    {
-                        Length = 26,
-                        CharSet = new PwCharSet(PwCharSet.LowerCase + PwCharSet.UpperCase + PwCharSet.Digits + PwCharSet.PrintableAsciiSpecial)
-                    },
-                            UTF8Encoding.UTF8.GetBytes(@"s_df-ds\/8&fK3f#4$4@05!6k_1@"),
+                        {
+                            Length = 26,
+                            CharSet = new PwCharSet(PwCharSet.LowerCase + 
+                                                    PwCharSet.UpperCase + 
+                                                    PwCharSet.Digits + 
+                                                    PwCharSet.PrintableAsciiSpecial)
+                        },
+                            UTF8Encoding.UTF8.GetBytes(RndString.GetRandomString(28)),
                             new CustomPwGeneratorPool());
                     ent.Strings.Set("AESpassword", new ProtectedString(true, aesPwd.ReadString()));
                     Trace.TraceInformation($"The value of the AESPass in the Entry {entryName} has been added to KeePass DB");
                     ent.Strings.Set("Salt", new ProtectedString(true, salt.ReadString()));
                     Trace.TraceInformation($"The value of the Salt in the Entry {entryName} has been added to KeePass DB");
-                    // Create IV
+                // Create IV
                     SymmetricAlgorithm cipher = SymmetricAlgorithm.Create("AesManaged");
                     cipher.Mode = CipherMode.CBC;
                     cipher.Padding = PaddingMode.PKCS7;
                     ent.Strings.Set("IV", new ProtectedString(true, Convert.ToBase64String(cipher.IV)));
                     Trace.TraceInformation($"The value of the IV in the Entry {entryName} has been added to KeePass DB");
                     PwDB.Save(statusLogger);
-                    // Add dummy values to the dictionary to pass the check
+                // Add dummy values to the dictionary to pass the check in the end of the method
                     dict.Add("Salt", new ProtectedString(true, ent.Strings.ReadSafe("Salt")));
                     dict.Add("Password", new ProtectedString(true, "dummy"));
                     dict.Add("AESPass", new ProtectedString(true, ent.Strings.ReadSafe("AESpassword")));
@@ -769,9 +786,9 @@ namespace SalesForceAttachmentsBackupTools
             return response;
         }
         
-        private static void WaitExitingCountdown()
+        private static void WaitExitingCountdown(TimeSpan wt)
         {
-            int i = waittime.Seconds;
+            int i = wt.Seconds;
             Task.Factory.StartNew(() =>
             {
                 Timer timer = new Timer(new TimerCallback((e) =>
@@ -792,7 +809,7 @@ namespace SalesForceAttachmentsBackupTools
             HelpText ="Set the working mode.\nRead - to read the data from the SF org and store them into a file;" +
             "\nWrite - to read the data from encrypted file and store them back into the SF org;"+
             "\nCompare - to compare the data from the encrypted file and SF org;" +
-            "\nPrepare - to prepare Crypto stuff in the given KDBX file (AESPassword, Salt and IV)")]
+            "\nPrepare - to prepare Crypto stuff in the given KDBX file (adds correctly filled AESPassword, Salt and IV records)")]
 
         public WorkingModes WorkMode { get; set; }
 
@@ -820,30 +837,32 @@ namespace SalesForceAttachmentsBackupTools
 
         [Option('t',"targetfile",
             HelpText ="Sets the path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
-        public string ecryptedAttachmentsTargetFile { get; set; }
+        public string EcryptedAttachmentsTargetFile { get; set; }
 
         [Option('n',"threads", Default = 2, MetaValue ="2",
             HelpText ="Sets the number of concurrent threads")]
-        public int numberOfWorkingThreads { get; set; }
+        public int NumberOfWorkingThreads { get; set; }
 
         [Option ('c', "comppath",
             HelpText ="Sets path to the file with comparison results",
             MetaValue ="D:\\Doc_comp_res.dat")]
-        public string comparisonResultsFilePath { get; set; }
+        public string ComparisonResultsFilePath { get; set; }
 
         [Option('l', "logfile",
             HelpText ="Sets the path to the logging file in additon to logging to the Console")]
-        public string logFilePath { get; set; }
+        public string LogFilePath { get; set; }
 
         [Option('x',"logtoconsole", Default = 1,
             HelpText ="Switches logging to Console mode on(<>0)/off(0). Might be useful since it doesn't waste time on UI output, though makes survey possible only through log file (if any provided).",
             MetaValue = "1")]
-        public int logToConsole { get; set; }
+        public int LogToConsole { get; set; }
 
         [Option('f',"filter", Default = null,
-            HelpText ="Takes a filter when running in the \"Read\" mode",
+            HelpText ="Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;"+
+            "\nit seems more usable to give the filtering condition in the form of Filed IN ('value1', 'value2');" +
+            "\ntext values must be enclosed in the single quotes.",
             MetaValue = "Id=Adfd000werwer")]
-        public IEnumerable<string> readModeFilter { get; set; }
+        public IEnumerable<string> ReadModeFilter { get; set; }
     }
 
     enum SFObjectsWithAttachments
