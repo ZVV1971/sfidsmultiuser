@@ -83,7 +83,7 @@ namespace SalesForceAttachmentsBackupTools
                         pathToComparisonResults = opt.ComparisonResultsFilePath;
                         if (workingMode == WorkingModes.Read)
                         {
-                            filter = "+WHERE+" + opt.ReadModeFilter.Aggregate((i,j)=> i + "+AND+" + j) ?? "";
+                            filter = "+WHERE+" + opt.ReadModeFilter;
                         }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
@@ -873,7 +873,7 @@ namespace SalesForceAttachmentsBackupTools
             "\nit seems more usable to give the filtering condition in the form of Filed IN ('value1', 'value2');" +
             "\ntext values must be enclosed in the single quotes.",
             MetaValue = "Id=Adfd000werwer")]
-        public IEnumerable<string> ReadModeFilter { get; set; }
+        public string ReadModeFilter { get; set; }
     }
 
     enum SFObjectsWithAttachments
