@@ -2,7 +2,9 @@
 using System.Collections.Generic;
 using System.IO.MemoryMappedFiles;
 using System.Security;
+using System.Text;
 using System.Threading;
+using System.Security.Cryptography;
 
 namespace AsyncSalesForceAttachments
 {
@@ -138,5 +140,28 @@ namespace AsyncSalesForceAttachments
         }
 
         public int numberInQueue{ get; set; }
+    }
+
+    public class RndString
+    {
+        public static string GetRandomString(int len)
+        {
+            RNGCryptoServiceProvider rngCsp = new RNGCryptoServiceProvider();
+            string chars = @"!@#$%^&*()_+~`/<>?.,:;*-=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            StringBuilder stringChars = new StringBuilder(len);
+            
+            Random random = new Random();
+
+            byte[] b = new byte[len];
+
+            rngCsp.GetBytes(b);
+
+            for (int i = 0; i < len; i++)
+            {
+                stringChars.Append(chars[(int)b[i] % (chars.Length - 1)]);
+            }
+
+            return stringChars.ToString();
+        }
     }
 }
