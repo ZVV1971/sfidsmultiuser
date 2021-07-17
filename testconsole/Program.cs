@@ -58,8 +58,7 @@ namespace SalesForceAttachmentsBackupTools
                     entryName = opt.EntryName;
                     pathToKeePassDb = opt.KDBXPath;
                     objectWithAttachments = Enum.GetName(typeof(SFObjectsWithAttachments), opt.SFObject);
-                    resultFileName = opt.EcryptedAttachmentsTargetFile == null ?
-                        "encrypted_" + objectWithAttachments + ".dat" : opt.EcryptedAttachmentsTargetFile;
+                    resultFileName = opt.EcryptedAttachmentsTargetFile ?? "encrypted_" + objectWithAttachments + ".dat";
                     workingMode = opt.WorkMode;
                     numberOfThreads = opt.NumberOfWorkingThreads;
                     if (opt.LogFilePath != null && !opt.LogFilePath.Equals(String.Empty))
@@ -870,9 +869,8 @@ namespace SalesForceAttachmentsBackupTools
 
         [Option('f',"filter", Default = null,
             HelpText ="Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;"+
-            "\nit seems more usable to give the filtering condition in the form of Filed IN ('value1', 'value2');" +
             "\ntext values must be enclosed in the single quotes.",
-            MetaValue = "Id=Adfd000werwer")]
+            MetaValue = "Id IN ('Id1', 'Id2')")]
         public string ReadModeFilter { get; set; }
     }
 
