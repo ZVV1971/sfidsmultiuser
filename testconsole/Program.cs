@@ -8,6 +8,7 @@ using KeePassLib.Security;
 using KeePassLib.Serialization;
 using KeePassLib.Cryptography.PasswordGenerator;
 using Newtonsoft.Json.Linq;
+using RepresentativeSubset;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -45,10 +46,14 @@ namespace SalesForceAttachmentsBackupTools
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
         private static TimeSpan waittime = TimeSpan.FromSeconds(30);
         private static ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener();
+        private static bool useWindowsLogon = false;
+        private static SymmetricAlgorithm cipher;
+        private static Dictionary<string, ProtectedString> credentialsDict;
         #endregion fields
         [MTAThread]
         static async Task Main(string[] args)
         {
+            //Parse the arguments
             int result = Parser.Default.ParseArguments<Options>(args)
                 .MapResult(
                 (Options opt) =>
@@ -61,6 +66,7 @@ namespace SalesForceAttachmentsBackupTools
                     resultFileName = opt.EcryptedAttachmentsTargetFile ?? "encrypted_" + objectWithAttachments + ".dat";
                     workingMode = opt.WorkMode;
                     numberOfThreads = opt.NumberOfWorkingThreads;
+                    useWindowsLogon = opt.UseWindowsAccount == 1;
                     if (opt.LogFilePath != null && !opt.LogFilePath.Equals(String.Empty))
                     {
                         Trace.Listeners.Add(new TextWriterTraceListener(opt.LogFilePath, "Backup_fileTracer"));
@@ -69,12 +75,12 @@ namespace SalesForceAttachmentsBackupTools
                     if (opt.LogToConsole != 0) Trace.Listeners.Add(consoleTraceListener);
                     Trace.AutoFlush = true;
                     Trace.Listeners.Remove("Default");
-                    if (workingMode == WorkingModes.Compare && 
-                        (opt.ComparisonResultsFilePath == null || opt.ComparisonResultsFilePath.Equals(String.Empty))) 
+                    if (workingMode == WorkingModes.Compare &&
+                        (opt.ComparisonResultsFilePath == null || opt.ComparisonResultsFilePath.Equals(String.Empty)))
                     {
                         Trace.TraceError($"If workmode is set to compare then comparison file must be provided.");
                         WaitExitingCountdown(waittime);
-                        Environment.Exit(-1);
+                        Environment.Exit((int)ExitCodes.ComparisonFileIsAbsentError);
                         return 0;
                     }
                     else
@@ -84,48 +90,35 @@ namespace SalesForceAttachmentsBackupTools
                         {
                             filter = "+WHERE+" + opt.ReadModeFilter;
                         }
+                        if (workingMode == WorkingModes.Subset)
+                        {
+                            filter = opt.ReadModeFilter;
+                        }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
                     return 1;
                 },
                 (IEnumerable<Error> errs) =>
                 {
+                    //Let the user to read the error message and exit after waittime expires
                     WaitExitingCountdown(waittime);
-                    Environment.Exit(-1);
+                    Environment.Exit((int)ExitCodes.ArgumentParsingError);
                     return 0;
                 });
 
-            SecureString securePwd = new SecureString();
-
-            Console.Write("Enter password for KeePass: ");
-            do
-            {
-                key = Console.ReadKey(true);
-
-                if (key.Key != ConsoleKey.Backspace)
-                {
-                    // Append the character to the password.
-                    if (key.Key != ConsoleKey.Enter) securePwd.AppendChar(key.KeyChar);
-                    Console.Write("*");
-                }
-                else
-                {
-                    if (securePwd.Length > 0) 
-                    { 
-                        securePwd.RemoveAt(securePwd.Length - 1);
-                        Console.Write("\b \b");
-                    }
-                }
-                // Exit if Enter key is pressed.
-            } while (key.Key != ConsoleKey.Enter);
-            Console.WriteLine();
-
-            Dictionary<string, ProtectedString> credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(securePwd));
+            //Open KeePass (needed for every operation) and store credentials in the dictionary
+            //This is done with regard that the KDBX file could be protected by Windows credentials
+            //starting from some new versions as well.
+            credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(
+                    useWindowsLogon ? (new SecureString()) : ReadPasswordFromConsole(), useWindowsLogon));
             Trace.TraceInformation($"Got {credentialsDict.Count} credentials");
-            if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3)
+            if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3
+                && workingMode != WorkingModes.Prepare
+                && workingMode != WorkingModes.Subset)
             {
                 Trace.TraceError("Necessary cryptographic input is absent in the provided entry in the KDBX.");
                 WaitExitingCountdown(waittime);
+                Environment.Exit((int)ExitCodes.CryptographicStuffAbsenseError);
                 return;
             }
             else if (workingMode == WorkingModes.Prepare)
@@ -134,10 +127,24 @@ namespace SalesForceAttachmentsBackupTools
                 WaitExitingCountdown(waittime);
                 return;
             }
+            else if (workingMode == WorkingModes.Subset
+                 && credentialsDict.Where(t => t.Key == "UserName" || t.Key == "Password").Count() == 2)
+            {
+                Trace.TraceInformation("Got username and password from the given KeePass file");
+            }
+            else
+            {
+                Trace.TraceError("Unknown error occured");
+                Environment.Exit((int)ExitCodes.UnknownError);
+                return;
+            }
+
+            //Connect to the SalesForce org and store the results in a dictionary
             Dictionary<string, string> salesForceSID = new Dictionary<string, string>(await GetSalesForceSessionId(credentialsDict));
             if (salesForceSID.Count == 0)
             {
                 Trace.TraceError("Error getting SalesForce session ID. Exiting...");
+                Environment.Exit((int)ExitCodes.GettingSalesForceSessionIDError);
                 WaitExitingCountdown(waittime);
                 return;
             }
@@ -166,22 +173,20 @@ namespace SalesForceAttachmentsBackupTools
                         WaitExitingCountdown(waittime);
                         Environment.Exit(-3);
                     }
-                    break; ;
+                    break;
+                case WorkingModes.Subset:
+                    listOfIds = new List<string>();
+                    break;
+                default:
+                    break;
             }
             #endregion
-
-            #region CryptographicStuff
-            SymmetricAlgorithm cipher = SymmetricAlgorithm.Create("AesManaged");
-            cipher.Mode = CipherMode.CBC;
-            cipher.Padding = PaddingMode.PKCS7;
-            cipher.IV = Convert.FromBase64String(credentialsDict["IV"].ReadString());
-            Byte[] passwordKey = NewPasswordKey(SecureStringExtension.ToSecureString(credentialsDict["AESPass"].ReadString()),
-                credentialsDict["Salt"].ReadString());
-            #endregion
+            //Fill the cryptographic stuff only if it is needed, i.e. the working modes need it
+            if (workingMode != WorkingModes.Subset) cipher = PrepareCryptographicStuff(credentialsDict);
 
             #region StartWorkers
             List<Task> tasks = new List<Task>();
-            switch (workingMode) 
+            switch (workingMode)
             {
                 case WorkingModes.Read:
                     using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(resultFileName, false, Encoding.ASCII)))
@@ -190,35 +195,49 @@ namespace SalesForceAttachmentsBackupTools
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
-                                () => doWork(listOfIds.ToList(), salesForceSID, objectWithAttachments, cipher.CreateEncryptor(passwordKey, cipher.IV), resultStream)));
+                                () => doWork(listOfIds.ToList(), salesForceSID, objectWithAttachments, cipher.CreateEncryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV), resultStream)));
                         }
                         Task.WaitAll(tasks.ToArray());
                     }
                     break;
                 case WorkingModes.Write:
                     minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
-                    _ = FillQueue();
+                    _ = FillQueue(resultFileName);
                     Trace.TraceInformation($"Initiating {numberOfThreads} workers to write data.");
                     for (int i = 0; i < numberOfThreads; i++)
                     {
                         tasks.Add(Task.Run(
-                            () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, cipher.CreateDecryptor(passwordKey, cipher.IV))));
+                            () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV))));
                     }
                     Task.WaitAll(tasks.ToArray());
                     break;
                 case WorkingModes.Compare:
                     minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
-                    _ = FillQueue();
+                    _ = FillQueue(resultFileName);
                     using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(pathToComparisonResults, false, Encoding.ASCII)))
                     {
                         Trace.TraceInformation($"Initiating {numberOfThreads} workers to compare data.");
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
-                                () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, cipher.CreateDecryptor(passwordKey, cipher.IV), resultStream)));
+                                () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, 
+                                    cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()),
+                                    cipher.IV), resultStream)));
                         }
                         Task.WaitAll(tasks.ToArray());
                     }
+                    break;
+                case WorkingModes.Subset:
+                    listOfIds = (await GetListOfObjects(salesForceSID, filter)).ToList<string>();
+                    Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
+                    for (int i = 0; i < numberOfThreads; i++)
+                    {
+                        tasks.Add(Task.Run(
+                            () => doWork(listOfIds, salesForceSID)));
+                    }
+                    Task.WaitAll(tasks.ToArray());
+                    break;
+                default:
                     break;
             }
             Trace.TraceInformation("All threads complete");
@@ -227,14 +246,99 @@ namespace SalesForceAttachmentsBackupTools
         #endregion StartWorkers
 
         #region Methods
-        private static Task FillQueue()
+        private static async Task<IEnumerable<string>> GetListOfObjects(IDictionary<string,string> dic, string flt)
+        {
+            HttpResponseMessage listOfObjects = await ReadFromSalesForce(new Uri(dic["serverUrl"] + "/sobjects/"), 
+                dic, HttpMethod.Get, null);
+            JArray arr = JArray.Parse(JObject.Parse(await listOfObjects.Content.ReadAsStringAsync())["sobjects"].ToString());
+            Trace.TraceInformation($"Got totally {arr.Count} objects");
+            Trace.TraceInformation($"Amongst them only {arr.Where(t => t["updateable"].ToString().Equals("True")).Count()} are updatable");
+            
+            //Compose an array to be used for exclusion of __Share objects since they cannot contain any sensitive information
+            IEnumerable<JToken> excludeArray = arr.Where(t => t["name"].ToString().EndsWith("__Share"));
+            excludeArray.Concat(arr.Where(t => t["name"].ToString().EndsWith("__Tag")));
+            
+            List<string> lst = new List<string>();
+            if (flt == null)
+            {
+                foreach (JToken j in arr.Where(t => t["updateable"].ToString().Equals("True"))
+                    .Except(excludeArray))
+                {
+                    Trace.TraceInformation("No filter is given adding all the possible objects to the list");
+                    lst.Add(j["name"].ToString());
+                }
+            }
+            else
+            {
+                foreach (JToken j in arr.Where(t => t["updateable"].ToString().Equals("True"))
+                    .Except(excludeArray)
+                    .Join(filter.Split('|'),
+                    p => p["name"].ToString(),
+                    t => t,
+                    (p, t) => t))
+                {
+                    Trace.TraceInformation($"Filter is active; adding {j} to the list of the objects to be processed");
+                    lst.Add(j.ToString());
+                }
+            }
+            Trace.TraceInformation($"Total number of objects to be processes is {lst.Count}");
+            return lst;
+        }
+
+        private static SymmetricAlgorithm PrepareCryptographicStuff(IDictionary<string, ProtectedString> creds)
+            {
+                SymmetricAlgorithm cphr = SymmetricAlgorithm.Create("AesManaged");
+                cphr.Mode = CipherMode.CBC;
+                cphr.Padding = PaddingMode.PKCS7;
+                cphr.IV = Convert.FromBase64String(credentialsDict["IV"].ReadString());
+                Byte[] passwordKey = NewPasswordKey(SecureStringExtension.ToSecureString(creds["AESPass"].ReadString()),
+                    creds["Salt"].ReadString());
+                creds.Add("pwdKey", new ProtectedString(true, Convert.ToBase64String(passwordKey, 0, passwordKey.Length)));
+                return cphr;
+            }
+
+        private static SecureString ReadPasswordFromConsole()
+        {
+            SecureString secStr = new SecureString();
+            Console.Write("Enter password for KeePass: ");
+            do
+            {
+                key = Console.ReadKey(true);
+
+                if (key.Key != ConsoleKey.Backspace)
+                {
+                    // Append the character to the password.
+                    if (key.Key != ConsoleKey.Enter) secStr.AppendChar(key.KeyChar);
+                    Console.Write("*");
+                }
+                else
+                {
+                    if (secStr.Length > 0)
+                    {
+                        secStr.RemoveAt(secStr.Length - 1);
+                        Console.Write("\b \b");
+                    }
+                }
+                // Exit if Enter key is pressed.
+            } while (key.Key != ConsoleKey.Enter);
+            Console.WriteLine();
+            return secStr;
+        }
+
+        /// <summary>
+        /// Fills the queue with Ids and the encrypted content of the backup file
+        /// </summary>
+        /// <param name="resultFN">path to the encrypted backup</param>
+        /// <returns></returns>
+        private static Task FillQueue(string resultFN)
         {
             return Task.Factory.StartNew(() =>
             {
-                using (StreamReader reader = new StreamReader(resultFileName))
+                using (StreamReader reader = new StreamReader(resultFN))
                 {
                     int i = 1;
                     string line;
+                    //A check so as to ensure all Ids are the standard 18-characters SF ids
                     Regex reg = new Regex(@"^[a-zA-Z\d]{18},");
                     while (true)
                     {
@@ -262,6 +366,13 @@ namespace SalesForceAttachmentsBackupTools
                 }
             });
         }
+        
+        /// <summary>
+        /// Creates new password key basing on the given password and salt
+        /// </summary>
+        /// <param name="password">A secureString with the password</param>
+        /// <param name="salt">A string with the salt</param>
+        /// <returns></returns>
         private static Byte[] NewPasswordKey(SecureString password, string salt)
         {
             int iterations = 1000;
@@ -327,7 +438,63 @@ namespace SalesForceAttachmentsBackupTools
             return lst;
         }
 
-        //A worker for Read mode
+        /// <summary>
+        /// A worker for subset mode
+        /// </summary>
+        /// <param name="listOfIds">List of objects to be processed</param>
+        /// <param name="creds">credentials</param>
+        /// <returns></returns>
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds)
+        {
+            SynchronizedIds psid = new SynchronizedIds();
+            int currentId;
+            Guid guid = Guid.NewGuid();
+            Trace.TraceInformation($"A worker {guid} has started.");
+            HttpResponseMessage resp = null;
+            do
+            {
+                currentId = psid.GetCurrentID();
+                if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
+                {
+                    try
+                    {
+                        resp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" +(listOfIds.ToList())[currentId] + "/describe")
+                            , creds, HttpMethod.Get, null);
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceError("An exception occured while working in subset mode.\n" +
+                            ex.Message);
+                    }
+
+                    if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
+                    {
+                        JArray arrFields = JArray.Parse(JObject.Parse(await resp.Content.ReadAsStringAsync())["fields"].ToString());
+                    }
+                    else
+                    {
+                        Trace.TraceError($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the queue again");
+                        listOfIds.Append((listOfIds.ToList())[currentId]);
+                    }
+                    continue;
+                }
+                break;
+            } while (true);
+            Trace.TraceInformation($"A worker {guid} has finished the work.");
+        }
+
+        /// <summary>
+        /// A worker for Read mode; reads the attachment content from the given (default) object of the SalesForce org, encrypts
+        /// it using provided cryptographic stuff and stores it into the given shared Text Stream.
+        /// </summary>
+        /// <param name="queue">
+        /// A queue of Key-Value pairs with Ids; the singleton storing the number of the current Id is used to refer to the queue
+        /// </param>
+        /// <param name="creds">A dictionary with sessionId and other stuff required to interact with SalesForce org</param>
+        /// <param name="obj">The name of the SalesForce object</param>
+        /// <param name="cryptoTrans">Cryptographic stuff necessary to encrypt the attachment content</param>
+        /// <param name="writer">A shared text stream to store the encrypted data into</param>
+        /// <returns></returns>
         private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
             SynchronizedIds psid = new SynchronizedIds();
@@ -381,7 +548,16 @@ namespace SalesForceAttachmentsBackupTools
             Trace.TraceInformation($"A worker {guid} has finished the work.");
         }
 
-        //A worker for Write mode
+        /// <summary>
+        /// A worker for Write mode; decrypts the content of the stored backup and writes it back to the SalesForce org.
+        /// </summary>
+        /// <param name="queue">
+        /// A queue of Key-Value pairs with Ids; the singleton storing the number of the current Id is used to refer to the queue
+        /// </param>
+        /// <param name="creds">A dictionary with sessionId and other stuff required to interact with SalesForce org</param>
+        /// <param name="obj">Cryptographic stuff necessary to encrypt the attachment content</param>
+        /// <param name="cryptoTrans">A shared text stream to store the encrypted data into</param>
+        /// <returns></returns>
         private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
         {
             Guid guid = Guid.NewGuid();
@@ -463,7 +639,19 @@ namespace SalesForceAttachmentsBackupTools
             Trace.TraceInformation($"A worker {guid} has finished the work.");
         }
 
-        //A worker for Compare mode
+        /// <summary>
+        /// A worker for Compare mode; reads the attachment content from the given (default) object of the SalesForce org and from the
+        /// encrypted backup, decrypts it using provided cryptographic stuff, compares both values and stores the comparison results 
+        /// into the given shared Text Stream.
+        /// </summary>
+        /// <param name="queue">
+        /// A queue of Key-Value pairs with Ids; the singleton storing the number of the current Id is used to refer to the queue
+        /// </param>
+        /// <param name="creds">A dictionary with sessionId and other stuff required to interact with SalesForce org</param>
+        /// <param name="obj">The name of the SalesForce object</param>
+        /// <param name="cryptoTrans">Cryptographic stuff necessary to decrypt the backup content</param>
+        /// <param name="writer">A shared text stream to store the comparison results into</param>
+        /// <returns></returns>
         private static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
             SynchronizedIds psid = new SynchronizedIds();
@@ -558,7 +746,7 @@ namespace SalesForceAttachmentsBackupTools
 
         }
 
-        private static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password)
+        private static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password, bool UseWinLogon = false)
         {
             PwDatabase PwDB = new PwDatabase();
             IOConnectionInfo mioInfo = new IOConnectionInfo
@@ -566,7 +754,15 @@ namespace SalesForceAttachmentsBackupTools
                 Path = pathToKeePassDb
             };
             CompositeKey compositeKey = new CompositeKey();
-            compositeKey.AddUserKey(new KcpPassword(Marshal.PtrToStringAuto(Marshal.SecureStringToBSTR(Password))));
+            if (!UseWinLogon)
+            {
+                compositeKey.AddUserKey(new KcpPassword(Marshal.PtrToStringAuto(Marshal.SecureStringToBSTR(Password))));
+            }
+            else
+            {
+                compositeKey.AddUserKey(new KcpUserAccount());
+            }
+             
             IStatusLogger statusLogger = new NullStatusLogger();
 
             Dictionary<string, ProtectedString> dict = new Dictionary<string, ProtectedString>();
@@ -679,6 +875,13 @@ namespace SalesForceAttachmentsBackupTools
             return dict;
         }
     
+        /// <summary>
+        /// Tries to log in into the SalesForce org with given credentials        /// </summary>
+        /// <param name="creds">
+        /// A dictionary of ProtectedString with UserName and Password</param>
+        /// <returns>
+        /// A dictionary of strings with serverURL, sessionId, and number of seconds within during which the current session will be valid
+        /// </returns>
         private static async Task<IDictionary<string, string>> GetSalesForceSessionId(IDictionary<string, ProtectedString> creds)
         {
             string xmlString = @"<?xml version=""1.0"" encoding=""utf-8""?>
@@ -713,7 +916,7 @@ namespace SalesForceAttachmentsBackupTools
             var httpRequestMessage = new HttpRequestMessage
             {
                 Method = HttpMethod.Post,
-                RequestUri = new Uri("https://" + domainName + ".salesforce.com/services/Soap/u/45.0"),
+                RequestUri = new Uri("https://" + domainName + ".salesforce.com/services/Soap/u/40.0"),
                 Headers = {
                     { HttpRequestHeader.Accept.ToString(), "application/json" },
                     { "SOAPAction", "login" }
@@ -764,10 +967,61 @@ namespace SalesForceAttachmentsBackupTools
                         break;
                 }
             }
+
+            httpRequestMessage = new HttpRequestMessage
+            {
+                Method = HttpMethod.Get,
+                RequestUri = new Uri(dict["serverUrl"].Split(new char[] { '/' }).Take(3).Aggregate("", (c, n) => $"{c}/{n}").TrimStart('/') 
+                + "/services/data/"),
+                Headers = {
+                    { HttpRequestHeader.Accept.ToString(), "application/json" }
+                }
+            };
+
+            try
+            {
+                Trace.TraceInformation("Looking for the latest API...");
+                HttpResponseMessage msg = await client.SendAsync(httpRequestMessage, HttpCompletionOption.ResponseHeadersRead);
+                if (msg.IsSuccessStatusCode)
+                {
+                    Trace.TraceInformation("Got response from the server");
+                    string v = await msg.Content.ReadAsStringAsync();
+                    JArray arr = JArray.Parse(v);
+                    Trace.TraceInformation($"Got the last version of the API: {arr.Last["version"]}");
+                    dict.Add("latestAPIVersion", arr.Last["version"].ToString());
+                    string servUrl = dict["serverUrl"];
+                    dict.Remove("serverUrl");
+
+                    Regex regex = new Regex("v\\d{1,2}\\.\\d{1}");
+                    dict.Add("serverUrl", regex.Replace(servUrl, "v" + arr.Last["version"].ToString()));
+                }
+                else
+                {
+                    Trace.TraceError("Error getting the latest version of the API");
+                    return dict;
+                }
+            }
+            catch (Exception ex)
+            {
+                Trace.TraceError(ex.Message);
+                return dict;
+            }
+
             return dict;
         }
 
-        private static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, IDictionary<string,string> dic, HttpMethod method, string content)
+        /// <summary>
+        /// Reads from the SalesForce org after successful login
+        /// </summary>
+        /// <param name="requestUri"></param>
+        /// <param name="dic">
+        /// Contains at least sessionId after suceessful login to the SF org
+        /// </param>
+        /// <param name="method">One of the standard HTTP methods</param>
+        /// <param name="content">holds the possible form-like content (JSON) serialized as a string</param>
+        /// <returns>ResponseMessage (null) in case of failure -- errors go to the log</returns>
+        private static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, 
+            IDictionary<string,string> dic, HttpMethod method, string content)
         {
             HttpResponseMessage response = new HttpResponseMessage();
             List<string> lst = new List<string>();
@@ -795,7 +1049,10 @@ namespace SalesForceAttachmentsBackupTools
             }
             return response;
         }
-        
+        /// <summary>
+        /// Helper method to wait wt seconds for the user interactions
+        /// </summary>
+        /// <param name="wt"></param>
         private static void WaitExitingCountdown(TimeSpan wt)
         {
             int i = wt.Seconds;
@@ -816,10 +1073,11 @@ namespace SalesForceAttachmentsBackupTools
     {
         [Option('m', "workmode",
             Default = WorkingModes.Read,
-            HelpText ="Set the working mode.\nRead - to read the data from the SF org and store them into a file;" +
+            HelpText ="Set the working mode.\nRead - to read the data from the SF org and store them into a file (filer can be applied);" +
             "\nWrite - to read the data from encrypted file and store them back into the SF org;"+
             "\nCompare - to compare the data from the encrypted file and SF org;" +
-            "\nPrepare - to prepare Crypto stuff in the given KDBX file (adds correctly filled AESPassword, Salt and IV records)")]
+            "\nPrepare - to prepare Crypto stuff in the given KDBX file (adds correctly filled AESPassword, Salt and IV records)" +
+            "\nSubset - to store a subset in the RDB (filter can be applied)")]
 
         public WorkingModes WorkMode { get; set; }
 
@@ -829,11 +1087,11 @@ namespace SalesForceAttachmentsBackupTools
         public string SalesForceDomain { get; set; }
 
         [Option('g', "groupname", Required = true, MetaValue ="EPAM",
-            HelpText = "Gives the name of the group in the KeePass file where to look for the entry")]
+            HelpText = "Gives the name of the group in the KeePass file where to look for the entry with SalesForce credentials")]
         public string GroupName { get; set; }
 
         [Option('e', "entryname", Required = true, MetaValue = "EPAM",
-            HelpText = "Gives the name of the Entry within the group in the KeePass file with necessary credentials")]
+            HelpText = "Gives the name of the Entry within the group in the KeePass file with necessary credentials to connect to the SalesForce org")]
         public string EntryName { get; set; }
 
         [Option('k', "kdbxpath", Required = true,
@@ -868,10 +1126,16 @@ namespace SalesForceAttachmentsBackupTools
         public int LogToConsole { get; set; }
 
         [Option('f',"filter", Default = null,
-            HelpText ="Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;"+
-            "\ntext values must be enclosed in the single quotes.",
+            HelpText ="Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;" +
+            "\ntext values must be enclosed in the single quotes." +
+            "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names",
             MetaValue = "Id IN ('Id1', 'Id2')")]
         public string ReadModeFilter { get; set; }
+
+        [Option('w', Default = 0,
+            HelpText ="If this parameter is set to any value different from 0 then access to the KeePass file will be done using the current windows logon",
+            MetaValue = "0")]
+        public int UseWindowsAccount { get; set; }
     }
 
     enum SFObjectsWithAttachments
@@ -882,9 +1146,19 @@ namespace SalesForceAttachmentsBackupTools
 
     enum WorkingModes
     {
-        Read,
-        Write,
-        Compare,
-        Prepare
+        Read,       //Reads attachments from the selected (default) object in the SF org and stores its encrypted copies into the given (or default) CSV file
+        Write,      //Writes the content of the encrypted copies of attachment in the selected (default) object to the given SF org
+        Compare,    //Compares attachments in the selected (default) object of the SF org with their encypted copies and stores comaprison results into the given (default) file
+        Prepare,    //Prepares the cryptographic stuff in the given KeePass entity/group necessary to perform the above operations
+        Subset      //Create a subset of the objects in the given SalesForce org filter in this case must be pipe-separated object names
+    }
+
+    enum ExitCodes
+    {
+        ArgumentParsingError = -1,
+        CryptographicStuffAbsenseError = -2,
+        GettingSalesForceSessionIDError = -3,
+        ComparisonFileIsAbsentError = -4,
+        UnknownError = -999
     }
 }

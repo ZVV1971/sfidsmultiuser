@@ -5,12 +5,12 @@ using System.Runtime.InteropServices;
 // Общие сведения об этой сборке предоставляются следующим набором
 // набора атрибутов. Измените значения этих атрибутов, чтобы изменить сведения,
 // связанные со сборкой.
-[assembly: AssemblyTitle("testconsole")]
-[assembly: AssemblyDescription("")]
+[assembly: AssemblyTitle("AttachmentsBackup")]
+[assembly: AssemblyDescription("The software utility to read, write and compare encrypted attachments in a SalesForce© org.")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("testconsole")]
-[assembly: AssemblyCopyright("Copyright ©  2020")]
+[assembly: AssemblyCompany("EPAM")]
+[assembly: AssemblyProduct("")]
+[assembly: AssemblyCopyright("Copyright ZVV©  2020")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -32,5 +32,5 @@ using System.Runtime.InteropServices;
 // Можно задать все значения или принять номер сборки и номер редакции по умолчанию.
 // используя "*", как показано ниже:
 // [assembly: AssemblyVersion("1.0.*")]
-[assembly: AssemblyVersion("3.2.2.9")]
-[assembly: AssemblyFileVersion("3.2.2.8")]
+[assembly: AssemblyVersion("3.2.2.98")]
+[assembly: AssemblyFileVersion("3.2.2.97")]
