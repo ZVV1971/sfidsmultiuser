@@ -232,6 +232,16 @@ namespace SalesForceAttachmentsBackupTools
                     break;
                 case WorkingModes.Subset:
                     listOfIds = (await GetListOfObjects(salesForceSID, filter)).ToList<string>();
+
+                    //If target folder or file path has been given store absolute folder path to the dictionary
+                    if (pathToComparisonResults != null && !pathToComparisonResults.Equals(String.Empty))
+                    {
+                        try
+                        {
+                            salesForceSID.Add("targetPath", Path.GetDirectoryName(pathToComparisonResults));
+                        }
+                        catch { }
+                    }
                     Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
                     for (int i = 0; i < numberOfThreads; i++)
                     {
@@ -519,9 +529,11 @@ namespace SalesForceAttachmentsBackupTools
                             Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
                             while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
                             {
+                                //Every time the loop will wait twice as longer as the previous time
                                 initialSleep *= 2;
                                 Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
                                 Thread.Sleep(initialSleep * 1000);
+                                //Requests for job completion or failure
                                 jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
                                     , creds, HttpMethod.Get);
                                 if (jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
@@ -537,18 +549,36 @@ namespace SalesForceAttachmentsBackupTools
                             if (jobInfo["state"].ToString().Equals("JobComplete"))
                             {
                                 //The job has successfully completed
-                                //Need to read the data
+                                //Need to read the CSV data
                                 jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
                                     , creds, HttpMethod.Get, accepts: "txt/csv");
-                                using (StreamWriter streamWriter = 
-                                    new StreamWriter( new FileStream($"{guid}_{currObject}.csv",
-                                    FileMode.CreateNew, FileAccess.Write),Encoding.UTF8)
-                                    )
+                                //And to store the data in a CSV file
+                                if (true)
                                 {
-                                    byte[] b = await jobresp.Content.ReadAsByteArrayAsync();
-                                    streamWriter.Write(Encoding.UTF8.GetString(b));
+                                    string path;
+                                    bool pathExists = creds.TryGetValue("targetPath", out path);
+                                    if (pathExists)
+                                    {
+                                        path = Path.Combine(path, $"{guid}_{currObject}.csv");
+                                    }
+                                    else
+                                    {
+                                        path = $"{guid}_{currObject}.csv";
+                                    }
+                                    using (StreamWriter streamWriter =
+                                        new StreamWriter(new FileStream(path,
+                                        FileMode.CreateNew, FileAccess.Write), Encoding.UTF8)
+                                        )
+                                    {
+                                        byte[] b = await jobresp.Content.ReadAsByteArrayAsync();
+                                        streamWriter.Write(Encoding.UTF8.GetString(b));
+                                    }
+                                    Trace.TraceInformation($"{path} has been created");
                                 }
-                                Trace.TraceInformation($"{guid}_{currObject}.csv has been created");
+                                else
+                                {
+                                    ;
+                                }
                             }
                             else
                             {
@@ -1195,16 +1225,17 @@ namespace SalesForceAttachmentsBackupTools
         public SFObjectsWithAttachments SFObject { get; set; }
 
         [Option('t',"targetfile",
-            HelpText ="Sets the path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
+            HelpText = "Sets the path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
         public string EcryptedAttachmentsTargetFile { get; set; }
 
         [Option('n',"threads", Default = 2, MetaValue ="2",
-            HelpText ="Sets the number of concurrent threads")]
+            HelpText = "Sets the number of concurrent threads")]
         public int NumberOfWorkingThreads { get; set; }
 
         [Option ('c', "comppath",
-            HelpText ="Sets path to the file with comparison results",
-            MetaValue ="D:\\Doc_comp_res.dat")]
+            HelpText ="Sets path to the file with comparison results" +
+            "\nIn case Subset workmode is selected and files are going to be stored in a CSV format sets a target folder",
+            MetaValue = "D:\\Doc_comp_res.dat")]
         public string ComparisonResultsFilePath { get; set; }
 
         [Option('l', "logfile",

@@ -8,8 +8,8 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyTitle("sfidsmultiuser")]
 [assembly: AssemblyDescription("")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("")]
-[assembly: AssemblyProduct("sfidsmultiuser")]
+[assembly: AssemblyCompany("EPAM")]
+[assembly: AssemblyProduct("SalesForce Helper Library")]
 [assembly: AssemblyCopyright("Copyright ©  2020")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
@@ -32,5 +32,5 @@ using System.Runtime.InteropServices;
 // Можно задать все значения или принять номер сборки и номер редакции по умолчанию.
 // используя "*", как показано ниже:
 // [assembly: AssemblyVersion("1.0.*")]
-[assembly: AssemblyVersion("1.0.0.173")]
-[assembly: AssemblyFileVersion("1.0.0.115")]
+[assembly: AssemblyVersion("1.0.0.181")]
+[assembly: AssemblyFileVersion("1.0.0.120")]
