@@ -8,6 +8,7 @@ using KeePassLib.Security;
 using KeePassLib.Serialization;
 using KeePassLib.Cryptography.PasswordGenerator;
 using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
 using RepresentativeSubset;
 using System;
 using System.Collections.Generic;
@@ -112,6 +113,8 @@ namespace SalesForceAttachmentsBackupTools
             credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(
                     useWindowsLogon ? (new SecureString()) : ReadPasswordFromConsole(), useWindowsLogon));
             Trace.TraceInformation($"Got {credentialsDict.Count} credentials");
+
+            //Check whether the number of credentials and their names are enough depending on the workmode
             if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3
                 && workingMode != WorkingModes.Prepare
                 && workingMode != WorkingModes.Subset)
@@ -240,14 +243,26 @@ namespace SalesForceAttachmentsBackupTools
                 default:
                     break;
             }
-            Trace.TraceInformation("All threads complete");
+            Trace.TraceInformation("All threads have completed");
             WaitExitingCountdown(waittime);
         }
         #endregion StartWorkers
 
+        /// <summary>
+        /// Gets the list of the objects from the SalesForce org as a JSON response
+        /// parses it and returns filtered list of objects names to be further processed
+        /// by the system.
+        /// Non-updateable objects among them almost all system ones are skipped
+        /// __Share & __Tag objects are skipped as well.
+        /// </summary>
+        /// <param name="dic">A IDictionary collection with credentials</param>
+        /// <param name="flt">A nullable filter string, must contain pipe-separated names of the objects that will then be processed
+        /// if found among those present in the SF org</param>
+        /// <returns></returns>
         #region Methods
         private static async Task<IEnumerable<string>> GetListOfObjects(IDictionary<string,string> dic, string flt)
         {
+            Trace.TraceInformation("Getting the list of the objects, please, wait it may take a little while...");
             HttpResponseMessage listOfObjects = await ReadFromSalesForce(new Uri(dic["serverUrl"] + "/sobjects/"), 
                 dic, HttpMethod.Get, null);
             JArray arr = JArray.Parse(JObject.Parse(await listOfObjects.Content.ReadAsStringAsync())["sobjects"].ToString());
@@ -257,7 +272,10 @@ namespace SalesForceAttachmentsBackupTools
             //Compose an array to be used for exclusion of __Share objects since they cannot contain any sensitive information
             IEnumerable<JToken> excludeArray = arr.Where(t => t["name"].ToString().EndsWith("__Share"));
             excludeArray.Concat(arr.Where(t => t["name"].ToString().EndsWith("__Tag")));
-            
+            //
+            // Others exclusions must be added in the same manner here
+            //
+
             List<string> lst = new List<string>();
             if (flt == null)
             {
@@ -425,8 +443,9 @@ namespace SalesForceAttachmentsBackupTools
                 {
                     if (j["nextRecordsUrl"] != null)
                     {
-                        requestUri = new Uri(dic["serverUrl"] + "/query" + j["nextRecordsUrl"].ToString().Substring(j["nextRecordsUrl"].ToString().LastIndexOf('/')));
-                        Trace.TraceInformation(requestUri.ToString());
+                        requestUri = new Uri(dic["serverUrl"] + "/query"
+                            + j["nextRecordsUrl"].ToString().Substring(j["nextRecordsUrl"].ToString().LastIndexOf('/')));
+                        Trace.TraceInformation($"Getting IDs from the {requestUri}");
                     }
                     else break;
                 }
@@ -439,7 +458,7 @@ namespace SalesForceAttachmentsBackupTools
         }
 
         /// <summary>
-        /// A worker for subset mode
+        /// A worker for Subset mode; creates subsets from the SalesForce org
         /// </summary>
         /// <param name="listOfIds">List of objects to be processed</param>
         /// <param name="creds">credentials</param>
@@ -456,9 +475,11 @@ namespace SalesForceAttachmentsBackupTools
                 currentId = psid.GetCurrentID();
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
+                    string currObject = (listOfIds.ToList())[currentId];
                     try
                     {
-                        resp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" +(listOfIds.ToList())[currentId] + "/describe")
+                        Trace.TraceInformation($"Sending request to SF org from {guid} to describe {currObject}");
+                        resp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" +currObject + "/describe")
                             , creds, HttpMethod.Get, null);
                     }
                     catch (Exception ex)
@@ -467,14 +488,84 @@ namespace SalesForceAttachmentsBackupTools
                             ex.Message);
                     }
 
+                    int initialSleep = 3;
                     if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
                     {
                         JArray arrFields = JArray.Parse(JObject.Parse(await resp.Content.ReadAsStringAsync())["fields"].ToString());
+                        Trace.TraceInformation($"{guid} got {arrFields.Count} fields described in the {currObject}");
+
+                        var jobJsonObj = new
+                        {
+                            operation = "query",
+                            query = "SELECT Id," +
+                            //A selector condition must be added here
+                            arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                .Select(o => o["name"].ToString())
+                                .Aggregate("", (c, n) => $"{c}, {n}")
+                                .TrimStart(',')
+                            + " FROM " + currObject,
+                            contentType = "CSV",
+                            columnDelimiter = "PIPE",
+                            lineEnding = "CRLF"
+                        };
+                        string jobLoad = JsonConvert.SerializeObject(jobJsonObj);
+
+                       HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
+                           , creds, HttpMethod.Post, jobLoad);
+
+                        if(jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
+                        {
+                            JObject jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                            Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
+                            while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
+                            {
+                                initialSleep *= 2;
+                                Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
+                                Thread.Sleep(initialSleep * 1000);
+                                jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
+                                    , creds, HttpMethod.Get);
+                                if (jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
+                                {
+                                    jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                }
+                                else
+                                {
+                                    jobInfo["state"] = "UnknowError";
+                                    break;
+                                }
+                            }
+                            if (jobInfo["state"].ToString().Equals("JobComplete"))
+                            {
+                                //The job has successfully completed
+                                //Need to read the data
+                                jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
+                                    , creds, HttpMethod.Get, accepts: "txt/csv");
+                                using (StreamWriter streamWriter = 
+                                    new StreamWriter( new FileStream($"{guid}_{currObject}.csv",
+                                    FileMode.CreateNew, FileAccess.Write),Encoding.UTF8)
+                                    )
+                                {
+                                    byte[] b = await jobresp.Content.ReadAsByteArrayAsync();
+                                    streamWriter.Write(Encoding.UTF8.GetString(b));
+                                }
+                                Trace.TraceInformation($"{guid}_{currObject}.csv has been created");
+                            }
+                            else
+                            {
+                                Trace.TraceError($"Error processing Bulk job {jobInfo["id"]} for {currObject} with the state {jobInfo["state"]}");
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            Trace.TraceError($"Error creating Bulk job for {currObject}");
+                            continue;
+                        }
                     }
                     else
                     {
-                        Trace.TraceError($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the queue again");
-                        listOfIds.Append((listOfIds.ToList())[currentId]);
+                        Trace.TraceError($"{currObject} failed to read. Sending to the queue again");
+                        listOfIds.Append(currObject);
                     }
                     continue;
                 }
@@ -1021,21 +1112,21 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="content">holds the possible form-like content (JSON) serialized as a string</param>
         /// <returns>ResponseMessage (null) in case of failure -- errors go to the log</returns>
         private static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, 
-            IDictionary<string,string> dic, HttpMethod method, string content)
+            IDictionary<string,string> dic, HttpMethod method, string content = null, string accepts = "application/json")
         {
             HttpResponseMessage response = new HttpResponseMessage();
-            List<string> lst = new List<string>();
             HttpRequestMessage msg = new HttpRequestMessage
             {
                 Method = method,
                 RequestUri = requestUri,
                 Headers = {
-                    { HttpRequestHeader.Accept.ToString(), "application/json" },
+                    { HttpRequestHeader.Accept.ToString(), accepts },
                     { "Authorization", "Bearer " + dic["sessionId"] }
                 }
             };
             if (content != null)
             {
+                msg.Headers.Add(HttpRequestHeader.ContentType.ToString(), "application/json");
                 msg.Content = new StringContent(content, Encoding.UTF8, "application/json");
             }
 
