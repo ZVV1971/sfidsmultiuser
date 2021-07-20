@@ -39,6 +39,7 @@ namespace SalesForceAttachmentsBackupTools
         private static string resultFileName;
         private static string pathToComparisonResults;
         private static string filter;
+        private static string pathToJSONfile;
         private static int numberOfThreads;
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
@@ -68,6 +69,7 @@ namespace SalesForceAttachmentsBackupTools
                     workingMode = opt.WorkMode;
                     numberOfThreads = opt.NumberOfWorkingThreads;
                     useWindowsLogon = opt.UseWindowsAccount == 1;
+                    pathToJSONfile = opt.PathToExcludeObjectsJson;
                     if (opt.LogFilePath != null && !opt.LogFilePath.Equals(String.Empty))
                     {
                         Trace.Listeners.Add(new TextWriterTraceListener(opt.LogFilePath, "Backup_fileTracer"));
@@ -231,6 +233,7 @@ namespace SalesForceAttachmentsBackupTools
                     }
                     break;
                 case WorkingModes.Subset:
+                    if (pathToJSONfile != null) salesForceSID.Add("pathToJson", pathToJSONfile);
                     listOfIds = (await GetListOfObjects(salesForceSID, filter)).ToList<string>();
 
                     //If target folder or file path has been given store absolute folder path to the dictionary
@@ -281,11 +284,24 @@ namespace SalesForceAttachmentsBackupTools
             
             //Compose an array to be used for exclusion of __Share objects since they cannot contain any sensitive information
             IEnumerable<JToken> excludeArray = arr.Where(t => t["name"].ToString().EndsWith("__Share"));
-            excludeArray.Concat(arr.Where(t => t["name"].ToString().EndsWith("__Tag")));
-            //
+            excludeArray = excludeArray.Concat(arr.Where(t => t["name"].ToString().EndsWith("__Tag")));
             // Others exclusions must be added in the same manner here
-            //
-
+            string path;
+            if (dic.TryGetValue("pathToJson", out path))
+            {
+                try
+                {
+                    List<JToken> tk = new List<JToken>();
+                    JObject data = JObject.Parse(File.ReadAllText(path));
+                    foreach(JToken j in JArray.Parse(data["ObjectsToExclude"].ToString()))
+                    {
+                        tk.Add(arr.Where(t => t["name"].ToString().Equals(j.ToString())).First());
+                    }
+                    excludeArray = excludeArray.Concat(tk);
+                }
+                catch { }
+            }
+ 
             List<string> lst = new List<string>();
             if (flt == null)
             {
@@ -1194,11 +1210,12 @@ namespace SalesForceAttachmentsBackupTools
     {
         [Option('m', "workmode",
             Default = WorkingModes.Read,
-            HelpText ="Set the working mode.\nRead - to read the data from the SF org and store them into a file (filer can be applied);" +
-            "\nWrite - to read the data from encrypted file and store them back into the SF org;"+
+            HelpText = "Set the working mode.\nRead - to read the data from the SF org and store them into a file (filer can be applied);" +
+            "\nWrite - to read the data from encrypted file and store them back into the SF org;" +
             "\nCompare - to compare the data from the encrypted file and SF org;" +
             "\nPrepare - to prepare Crypto stuff in the given KDBX file (adds correctly filled AESPassword, Salt and IV records)" +
-            "\nSubset - to store a subset in the RDB (filter can be applied)")]
+            "\nSubset - to store a subset in the RDB (filter can be applied)",
+            MetaValue = "Read")]
 
         public WorkingModes WorkMode { get; set; }
 
@@ -1207,7 +1224,7 @@ namespace SalesForceAttachmentsBackupTools
             HelpText = "Represents a domain used to log into SalesForce from, e.g. https://test.salesforce.com")]
         public string SalesForceDomain { get; set; }
 
-        [Option('g', "groupname", Required = true, MetaValue ="EPAM",
+        [Option('g', "groupname", Required = true, MetaValue = "EPAM",
             HelpText = "Gives the name of the group in the KeePass file where to look for the entry with SalesForce credentials")]
         public string GroupName { get; set; }
 
@@ -1216,48 +1233,57 @@ namespace SalesForceAttachmentsBackupTools
         public string EntryName { get; set; }
 
         [Option('k', "kdbxpath", Required = true,
-            HelpText = "Sets the path to the KeePass file with the credentials. The file must not be key-file protected!")]
+            HelpText = "Sets the path to the KeePass file with the credentials. The file must not be key-file protected!",
+            MetaValue = "D:\\creds.kdbx")]
         public string KDBXPath { get; set; }
 
         [Option('o', "sfobject", Default = SFObjectsWithAttachments.Document,
-            HelpText ="Points out which SalesForce object the body of attachments should be taken from",
-            MetaValue ="Document")]
+            HelpText = "Points out which SalesForce object the body of attachments should be taken from",
+            MetaValue = "Document")]
         public SFObjectsWithAttachments SFObject { get; set; }
 
-        [Option('t',"targetfile",
-            HelpText = "Sets the path to the target (source in case of write) file to store (to read) encrypted attachments to (from)")]
+        [Option('t', "targetfile",
+            HelpText = "Sets the path to the target (source in case of write) file to store (to read) encrypted attachments to (from)",
+            MetaValue = "D:\\Attach.bkp")]
         public string EcryptedAttachmentsTargetFile { get; set; }
 
-        [Option('n',"threads", Default = 2, MetaValue ="2",
+        [Option('n', "threads", Default = 2, MetaValue = "2",
             HelpText = "Sets the number of concurrent threads")]
         public int NumberOfWorkingThreads { get; set; }
 
-        [Option ('c', "comppath",
-            HelpText ="Sets path to the file with comparison results" +
+        [Option('c', "comppath",
+            HelpText = "Sets path to the file with comparison results" +
             "\nIn case Subset workmode is selected and files are going to be stored in a CSV format sets a target folder",
             MetaValue = "D:\\Doc_comp_res.dat")]
         public string ComparisonResultsFilePath { get; set; }
 
         [Option('l', "logfile",
-            HelpText ="Sets the path to the logging file in additon to logging to the Console")]
+            HelpText = "Sets the path to the logging file in additon to logging to the Console",
+            MetaValue = "D:\\Att_bkp.log")]
         public string LogFilePath { get; set; }
 
-        [Option('x',"logtoconsole", Default = 1,
-            HelpText ="Switches logging to Console mode on(<>0)/off(0). Might be useful since it doesn't waste time on UI output, though makes survey possible only through log file (if any provided).",
+        [Option('x', "logtoconsole", Default = 1,
+            HelpText = "Switches logging to Console mode on(<>0)/off(0). Might be useful since it doesn't waste time on UI output, though makes survey possible only through log file (if any provided).",
             MetaValue = "1")]
         public int LogToConsole { get; set; }
 
-        [Option('f',"filter", Default = null,
-            HelpText ="Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;" +
+        [Option('f', "filter", Default = null,
+            HelpText = "Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;" +
             "\ntext values must be enclosed in the single quotes." +
             "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names",
             MetaValue = "Id IN ('Id1', 'Id2')")]
         public string ReadModeFilter { get; set; }
 
-        [Option('w', Default = 0,
-            HelpText ="If this parameter is set to any value different from 0 then access to the KeePass file will be done using the current windows logon",
+        [Option('w', "winauth", Default = 0,
+            HelpText = "If this parameter is set to any value different from 0 then access to the KeePass file will be done using the current windows logon",
             MetaValue = "0")]
         public int UseWindowsAccount { get; set; }
+
+        [Option("excludeobjects", Default = null, MetaValue = "D:\\ObjectsToExclude.json",
+            HelpText = "Sets path to the JSON file that must contain the array with object names to be excluded from the listing."
+            + "\nHere should be mentioned updateable objects that definitely do not contain sensitive information"
+            + "\nImportant in subset mode. {\"ObjectsToExclude\":[\"Attachment\", \"Document\"]}")]
+        public string PathToExcludeObjectsJson { get; set; }
     }
 
     enum SFObjectsWithAttachments

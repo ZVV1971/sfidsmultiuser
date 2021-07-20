@@ -90,10 +90,10 @@ namespace RepresentativeSubset.Tests
             Assert.IsTrue(watch.ElapsedMilliseconds <= 100, "The execution took {0} miliseconds", watch.ElapsedMilliseconds);
         }
 
-        [TestMethod("Measure execution time for Shuffling for a comparatively big array ~1.000.000")]
+        [TestMethod("Measure execution time for Shuffling for a comparatively big array ~13.000.000")]
         public void CheckExecutionTimeForShuffle()
         {
-            string[] array1 = new string[1000000];
+            string[] array1 = new string[13000000];
             for (int i = 0; i < array1.Length; i++) array1[i] = i.ToString();
 
             Stopwatch watch = Stopwatch.StartNew();
