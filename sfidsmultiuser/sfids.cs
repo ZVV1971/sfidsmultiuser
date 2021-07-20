@@ -5,6 +5,8 @@ using System.Security;
 using System.Text;
 using System.Threading;
 using System.Security.Cryptography;
+using System.Linq;
+using System.ComponentModel.DataAnnotations;
 
 namespace AsyncSalesForceAttachments
 {
@@ -162,6 +164,67 @@ namespace AsyncSalesForceAttachments
             }
 
             return stringChars.ToString();
+        }
+    }
+}
+
+namespace RepresentativeSubset
+{
+    public class SubsetHelper<T>
+    {
+        public static IEnumerable<T> MakeSubset( IEnumerable<T> OriginalSet, 
+            [Range(minimum: 0, maximum: 100, ErrorMessage = "Percentage out of range")] 
+            int SubsetPercentage = 10, 
+            int MinNumber = 0)
+        {
+            if (SubsetPercentage <=0)
+            {
+                throw new ArgumentOutOfRangeException("SubsetPercentage", SubsetPercentage, "Argument cannot be less or equal to zero");
+            }
+            if (SubsetPercentage > 100)
+            {
+                throw new ArgumentOutOfRangeException("SubsetPercentage", SubsetPercentage, "Argument cannot be greater than 100");
+            }
+
+            List<T> ReturnValue = new List<T>();
+
+            List<T> os = OriginalSet.ToList<T>();
+
+            int NumberOfRecords = (MinNumber == 0 || MinNumber > os.Count) ? os.Count * SubsetPercentage / 100 : MinNumber;
+
+            return ReturnValue;
+        }
+
+        public static IEnumerable<T> Shuffle (IEnumerable<T> OriginalSubset)
+        {
+            RNGCryptoServiceProvider rngCsp = new RNGCryptoServiceProvider();
+            //Random rnd = new Random();
+            List<T> lt = OriginalSubset.ToList<T>();
+            List<T> rlst = new List<T>();
+            byte[] RandomNumber = new byte[4];
+            while (lt.Count > 0)
+            {
+                rngCsp.GetBytes(RandomNumber);
+                UInt32 i = BitConverter.ToUInt32 (RandomNumber, 0);
+                int NumberToPick = (int)(i % lt.Count);
+                //int NumberToPick = rnd.Next(lt.Count);
+                rlst.Add(lt[NumberToPick]);
+                lt.RemoveAt(NumberToPick);
+            }
+            rngCsp.Dispose();
+            return rlst;
+        }
+        
+        public static IEnumerable<T> Quarter (IEnumerable<T> OriginalSubset)
+        {
+            List<T> res = new List<T>();
+            List<T> lt = OriginalSubset.ToList<T>();
+            for (int i = 0; i < lt.Count; i++)
+            {
+                if (i % 2 == 0) res.Add(lt[i]);
+            }
+
+            return res;
         }
     }
 }
