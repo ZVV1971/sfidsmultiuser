@@ -25,6 +25,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
+using System.Web;
 
 namespace SalesForceAttachmentsBackupTools
 {
@@ -91,7 +92,7 @@ namespace SalesForceAttachmentsBackupTools
                         pathToComparisonResults = opt.ComparisonResultsFilePath;
                         if (workingMode == WorkingModes.Read)
                         {
-                            filter = "+WHERE+" + opt.ReadModeFilter;
+                            filter = HttpUtility.UrlEncode(" WHERE " + opt.ReadModeFilter, Encoding.ASCII);
                         }
                         if (workingMode == WorkingModes.Subset)
                         {
@@ -117,31 +118,39 @@ namespace SalesForceAttachmentsBackupTools
             Trace.TraceInformation($"Got {credentialsDict.Count} credentials");
 
             //Check whether the number of credentials and their names are enough depending on the workmode
-            if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3
-                && workingMode != WorkingModes.Prepare
-                && workingMode != WorkingModes.Subset)
+            switch (workingMode)
             {
-                Trace.TraceError("Necessary cryptographic input is absent in the provided entry in the KDBX.");
-                WaitExitingCountdown(waittime);
-                Environment.Exit((int)ExitCodes.CryptographicStuffAbsenseError);
-                return;
-            }
-            else if (workingMode == WorkingModes.Prepare)
-            {
-                Trace.TraceInformation("Preparation of KDBX has been successfully completed");
-                WaitExitingCountdown(waittime);
-                return;
-            }
-            else if (workingMode == WorkingModes.Subset
-                 && credentialsDict.Where(t => t.Key == "UserName" || t.Key == "Password").Count() == 2)
-            {
-                Trace.TraceInformation("Got username and password from the given KeePass file");
-            }
-            else
-            {
-                Trace.TraceError("Unknown error occured");
-                Environment.Exit((int)ExitCodes.UnknownError);
-                return;
+                case WorkingModes.Read:
+                case WorkingModes.Write:
+                case WorkingModes.Compare:
+                    if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3)
+                    {
+                        Trace.TraceError("Insufficient cryptographic stuff; Either IV, Password for encryption or Salt records are absent in the given group/entity");
+                        WaitExitingCountdown(waittime);
+                        Environment.Exit((int)ExitCodes.CryptographicStuffAbsenseError);
+                        return;
+                    }
+                    else if(credentialsDict.Where(t => t.Key == "UserName" || t.Key == "Password").Count() < 2)
+                    {
+                        Trace.TraceError("Either Password or UserName are absent in the given group/entity");
+                        WaitExitingCountdown(waittime);
+                        Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                        return;
+                    }
+                    Trace.TraceInformation("Credentials and cryptographic stuff seem to be OK");
+                    break;
+                case WorkingModes.Subset:
+                    if (credentialsDict.Where(t => t.Key == "UserName" || t.Key == "Password").Count() < 2)
+                    {
+                        Trace.TraceError("Either Password or UserName are absent in the given group/entity");
+                        WaitExitingCountdown(waittime);
+                        Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                        return;
+                    }
+                    Trace.TraceInformation("Credentials and cryptographic stuff seem to be OK");
+                    break;
+                default:
+                    break;
             }
 
             //Connect to the SalesForce org and store the results in a dictionary
@@ -291,6 +300,7 @@ namespace SalesForceAttachmentsBackupTools
             {
                 try
                 {
+                    //An array of JTokens to collect SF objects described in the manner as in the org's json to add to the exclude array
                     List<JToken> tk = new List<JToken>();
                     JObject data = JObject.Parse(File.ReadAllText(path));
                     foreach(JToken j in JArray.Parse(data["ObjectsToExclude"].ToString()))
@@ -524,9 +534,11 @@ namespace SalesForceAttachmentsBackupTools
                         {
                             operation = "query",
                             query = "SELECT Id," +
-                            //A selector condition must be added here
+                            //Begin with only updateable fields since it is most probable that those not allowed for bulk querying 
+                            //will be amongst them
                             arrFields.Where(t => t["updateable"].ToString().Equals("True"))
                                 .Select(o => o["name"].ToString())
+                            //A selector condition must be added here
                                 .Aggregate("", (c, n) => $"{c}, {n}")
                                 .TrimStart(',')
                             + " FROM " + currObject,
@@ -534,21 +546,23 @@ namespace SalesForceAttachmentsBackupTools
                             columnDelimiter = "PIPE",
                             lineEnding = "CRLF"
                         };
-                        string jobLoad = JsonConvert.SerializeObject(jobJsonObj);
-
-                       HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
-                           , creds, HttpMethod.Post, jobLoad);
+                        
+                        HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
+                            , creds, HttpMethod.Post, JsonConvert.SerializeObject(jobJsonObj));
 
                         if(jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
                         {
                             JObject jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
                             Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
+                            
+                            //Loop to wait till the job has completed (or failed)
                             while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
                             {
                                 //Every time the loop will wait twice as longer as the previous time
                                 initialSleep *= 2;
                                 Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
                                 Thread.Sleep(initialSleep * 1000);
+                                
                                 //Requests for job completion or failure
                                 jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
                                     , creds, HttpMethod.Get);
@@ -676,7 +690,7 @@ namespace SalesForceAttachmentsBackupTools
                     else
                     {
                         Trace.TraceError($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the queue again");
-                        listOfIds.Append((listOfIds.ToList())[currentId]);
+                        listOfIds.Add((listOfIds.ToList())[currentId]);
                     }
                     continue;
                 }
@@ -1307,6 +1321,7 @@ namespace SalesForceAttachmentsBackupTools
         CryptographicStuffAbsenseError = -2,
         GettingSalesForceSessionIDError = -3,
         ComparisonFileIsAbsentError = -4,
-        UnknownError = -999
+        UnknownError = -999,
+        CredentialsAbsenseError = -5
     }
 }
