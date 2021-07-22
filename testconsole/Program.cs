@@ -42,14 +42,16 @@ namespace SalesForceAttachmentsBackupTools
         private static string filter;
         private static string pathToJSONfile;
         private static int numberOfThreads;
+        private static int minNumberOfRecords = 2000;               //Minimal number of records when subset cannot be done
+        private static int percentForSubset = 25;                   //Percent of original data to be passed to the subset
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
         private static List<string> listOfIds = null;
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
-        private static TimeSpan waittime = TimeSpan.FromSeconds(30);
+        private static TimeSpan waittime = TimeSpan.FromSeconds(30);                            //Time to wait before console closure
         private static ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener();
-        private static bool useWindowsLogon = false;
+        private static bool useWindowsLogon = false;                                            //Use windows authentication to open KBDX
         private static SymmetricAlgorithm cipher;
         private static Dictionary<string, ProtectedString> credentialsDict;
         #endregion fields
@@ -76,7 +78,11 @@ namespace SalesForceAttachmentsBackupTools
                         Trace.Listeners.Add(new TextWriterTraceListener(opt.LogFilePath, "Backup_fileTracer"));
                         Trace.Listeners["Backup_fileTracer"].TraceOutputOptions |= TraceOptions.DateTime;
                     }
-                    if (opt.LogToConsole != 0) Trace.Listeners.Add(consoleTraceListener);
+                    if (opt.LogToConsole != 0)
+                    {
+                        consoleTraceListener.TraceOutputOptions = TraceOptions.DateTime;
+                        Trace.Listeners.Add(consoleTraceListener);
+                    }
                     Trace.AutoFlush = true;
                     Trace.Listeners.Remove("Default");
                     if (workingMode == WorkingModes.Compare &&
@@ -502,16 +508,97 @@ namespace SalesForceAttachmentsBackupTools
         private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds)
         {
             SynchronizedIds psid = new SynchronizedIds();
-            int currentId;
+            int currentId, initialSleep, numberOfRecords;
+            List<string> mixedIds = new List<string>();
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage resp = null;
             do
             {
+                //Initialize variables for every object
+                initialSleep = 3;
+                numberOfRecords = int.MaxValue;
                 currentId = psid.GetCurrentID();
+
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
                     string currObject = (listOfIds.ToList())[currentId];
+
+                    //Getting number of records in the current object
+                    try
+                    {
+                        Trace.TraceInformation($"Sending request to get the number of records in the {currObject}");
+                        resp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/query/?q=" + 
+                            HttpUtility.UrlEncode($"SELECT count(Id) FROM {currObject}", Encoding.ASCII)), creds, HttpMethod.Get, null);
+                        if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
+                        {
+                            if (Int32.TryParse(JObject.Parse(await resp.Content.ReadAsStringAsync())["records"][0]["expr0"].ToString()
+                                , out numberOfRecords)) 
+                            {
+                                Trace.TraceInformation($"Number of records in the {currObject} is {numberOfRecords} - got by {guid}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceWarning($"Error reading number of lines for the {currObject} from {guid} {ex.Message}");
+                        Trace.TraceWarning($"No subsetting will be done for {currObject} from {guid}");
+                    }
+
+                    //Determine if the subsetting of the object need to be performed
+                    if (numberOfRecords >= minNumberOfRecords)
+                    {
+                        var jsonObj = new
+                        {
+                            operation = "query",
+                            query = $"SELECT Id FROM {currObject}"
+                        };
+                        try
+                        {
+                            Trace.TraceInformation($"Sending request to SF org from {guid} to get Ids of the {currObject} object");
+                            HttpResponseMessage idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
+                                , creds, HttpMethod.Post, JsonConvert.SerializeObject(jsonObj));
+                            if (idjobresp != null && idjobresp.Content != null && idjobresp.StatusCode == HttpStatusCode.OK)
+                            {
+                                JObject jobInfo = JObject.Parse(await idjobresp.Content.ReadAsStringAsync());
+                                Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the Ids from the {currObject} object");
+                                //Loop to wait till the job has completed (or failed)
+                                while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
+                                {
+                                    //Every time the loop will wait twice as longer as the previous time
+                                    initialSleep *= 2;
+                                    Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
+                                    Thread.Sleep(initialSleep * 1000);
+
+                                    //Requests for job completion or failure
+                                    idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
+                                        , creds, HttpMethod.Get);
+                                    if (idjobresp != null && idjobresp.Content != null && idjobresp.StatusCode == HttpStatusCode.OK)
+                                    {
+                                        jobInfo = JObject.Parse(await idjobresp.Content.ReadAsStringAsync());
+                                    }
+                                    else
+                                    {
+                                        jobInfo["state"] = "UnknowError";
+                                        break;
+                                    }
+                                }
+                                if (jobInfo["state"].ToString().Equals("JobComplete"))
+                                {
+                                    //The job has successfully completed. Need to read the CSV data
+                                    idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
+                                        , creds, HttpMethod.Get, accepts: "txt/csv");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Trace.TraceError($"An exception occured while trying to get Ids from {currObject}.\n" +
+                            ex.Message);
+                        }
+                    }
+
+                    //Getting the description of the current object
                     try
                     {
                         Trace.TraceInformation($"Sending request to SF org from {guid} to describe {currObject}");
@@ -520,11 +607,11 @@ namespace SalesForceAttachmentsBackupTools
                     }
                     catch (Exception ex)
                     {
-                        Trace.TraceError("An exception occured while working in subset mode.\n" +
+                        Trace.TraceError("An exception occured while working in the subset mode.\n" +
                             ex.Message);
                     }
 
-                    int initialSleep = 3;
+                    initialSleep = 3;
                     if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
                     {
                         JArray arrFields = JArray.Parse(JObject.Parse(await resp.Content.ReadAsStringAsync())["fields"].ToString());
@@ -582,11 +669,10 @@ namespace SalesForceAttachmentsBackupTools
                                 //Need to read the CSV data
                                 jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
                                     , creds, HttpMethod.Get, accepts: "txt/csv");
-                                //And to store the data in a CSV file
+                                //And to store the data in a CSV file if provided condition is met
                                 if (true)
                                 {
-                                    string path;
-                                    bool pathExists = creds.TryGetValue("targetPath", out path);
+                                    bool pathExists = creds.TryGetValue("targetPath", out string path);
                                     if (pathExists)
                                     {
                                         path = Path.Combine(path, $"{guid}_{currObject}.csv");
@@ -595,22 +681,19 @@ namespace SalesForceAttachmentsBackupTools
                                     {
                                         path = $"{guid}_{currObject}.csv";
                                     }
-                                    using (StreamWriter streamWriter =
-                                        new StreamWriter(new FileStream(path,
-                                        FileMode.CreateNew, FileAccess.Write), Encoding.UTF8)
-                                        )
+                                    using (StreamWriter streamWriter = new StreamWriter(new FileStream(path,
+                                        FileMode.CreateNew, FileAccess.Write), Encoding.UTF8))
                                     {
-                                        byte[] b = await jobresp.Content.ReadAsByteArrayAsync();
-                                        streamWriter.Write(Encoding.UTF8.GetString(b));
+                                        streamWriter.Write(Encoding.UTF8.GetString(await jobresp.Content.ReadAsByteArrayAsync()));
                                     }
                                     Trace.TraceInformation($"{path} has been created");
                                 }
-                                else
+                                else //some other target
                                 {
                                     ;
                                 }
                             }
-                            else
+                            else // Job is NOT complete
                             {
                                 Trace.TraceError($"Error processing Bulk job {jobInfo["id"]} for {currObject} with the state {jobInfo["state"]}");
                                 continue;
