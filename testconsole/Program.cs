@@ -42,8 +42,9 @@ namespace SalesForceAttachmentsBackupTools
         private static string filter;
         private static string pathToJSONfile;
         private static int numberOfThreads;
-        private static int minNumberOfRecords = 2000;               //Minimal number of records when subset cannot be done
-        private static int percentForSubset = 25;                   //Percent of original data to be passed to the subset
+        private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
+        private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
+        private static int bulkQueryLengthLimit = 100000;           //The limit imposed by the SalesForce on the bulk query length
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
@@ -103,6 +104,16 @@ namespace SalesForceAttachmentsBackupTools
                         if (workingMode == WorkingModes.Subset)
                         {
                             filter = opt.ReadModeFilter;
+                            if (opt.SubsetNumberOfRecords <= 0 || opt.SubsetPercentage > 100)
+                            {
+                                Trace.TraceWarning("Percentage range is invalid; using default value");
+                            }
+                            else percentForSubset = opt.SubsetPercentage;
+                            if (opt.SubsetNumberOfRecords <= 0) 
+                            { 
+                                Trace.TraceWarning("Minimal number of recods cannot be negative; using default value"); 
+                            }
+                            else minNumberOfRecords = opt.SubsetNumberOfRecords;
                         }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
@@ -510,6 +521,7 @@ namespace SalesForceAttachmentsBackupTools
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
             List<string> mixedIds = new List<string>();
+            bool needsToSubset;
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage resp = null;
@@ -519,6 +531,9 @@ namespace SalesForceAttachmentsBackupTools
                 initialSleep = 3;
                 numberOfRecords = int.MaxValue;
                 currentId = psid.GetCurrentID();
+                mixedIds.Clear();
+                needsToSubset = false;
+
 
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
@@ -546,8 +561,9 @@ namespace SalesForceAttachmentsBackupTools
                     }
 
                     //Determine if the subsetting of the object need to be performed
-                    if (numberOfRecords >= minNumberOfRecords)
+                    if (numberOfRecords >= minNumberOfRecords || percentForSubset < 100)
                     {
+                        needsToSubset = true;
                         var jsonObj = new
                         {
                             operation = "query",
@@ -588,6 +604,23 @@ namespace SalesForceAttachmentsBackupTools
                                     //The job has successfully completed. Need to read the CSV data
                                     idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
                                         , creds, HttpMethod.Get, accepts: "txt/csv");
+                                    using (var inputStreamReader = new StreamReader(await idjobresp.Content.ReadAsStreamAsync()))
+                                    {
+                                        string inputLine;
+                                        bool firstLine = false;
+                                        char[] Chars = new char[] { '"' };
+                                        Trace.TraceInformation($"Mixing up and quarting Ids for the {currObject} to make necessary subset");
+                                        while ((inputLine = inputStreamReader.ReadLine()) != null)
+                                        {
+                                            if (firstLine)
+                                            {
+                                                mixedIds.Add(inputLine.Trim(Chars));
+                                            }
+                                            else firstLine = true;
+                                        }
+                                        mixedIds = SubsetHelper<string>.MakeSubset(mixedIds, 
+                                            SubsetPercentage: percentForSubset, MinNumber: minNumberOfRecords).ToList<string>();
+                                    }
                                 }
                             }
                         }
@@ -596,6 +629,10 @@ namespace SalesForceAttachmentsBackupTools
                             Trace.TraceError($"An exception occured while trying to get Ids from {currObject}.\n" +
                             ex.Message);
                         }
+                    }
+                    else
+                    {
+                        Trace.TraceInformation($"No subsetting is necessary for {currObject}");
                     }
 
                     //Getting the description of the current object
@@ -617,98 +654,157 @@ namespace SalesForceAttachmentsBackupTools
                         JArray arrFields = JArray.Parse(JObject.Parse(await resp.Content.ReadAsStringAsync())["fields"].ToString());
                         Trace.TraceInformation($"{guid} got {arrFields.Count} fields described in the {currObject}");
 
-                        var jobJsonObj = new
-                        {
-                            operation = "query",
-                            query = "SELECT Id," +
-                            //Begin with only updateable fields since it is most probable that those not allowed for bulk querying 
-                            //will be amongst them
-                            arrFields.Where(t => t["updateable"].ToString().Equals("True"))
-                                .Select(o => o["name"].ToString())
-                            //A selector condition must be added here
-                                .Aggregate("", (c, n) => $"{c}, {n}")
-                                .TrimStart(',')
-                            + " FROM " + currObject,
-                            contentType = "CSV",
-                            columnDelimiter = "PIPE",
-                            lineEnding = "CRLF"
-                        };
-                        
-                        HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
-                            , creds, HttpMethod.Post, JsonConvert.SerializeObject(jobJsonObj));
-
-                        if(jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
-                        {
-                            JObject jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
-                            Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
-                            
-                            //Loop to wait till the job has completed (or failed)
-                            while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
+                        //If the the subsetting is required then create a partial request since its length cannot be more than 100000 characters
+                        //And there is no way to select random IDs except by naming them in the query -- no more than 4750 'Ids'
+                        int indexOfId = 0;
+                        int runNumber = 0;
+                        //
+                        do {
+                            bool commaFlag = false;
+                            StringBuilder limitedWhereCondition = new StringBuilder();
+                            if (needsToSubset)
                             {
-                                //Every time the loop will wait twice as longer as the previous time
-                                initialSleep *= 2;
-                                Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
-                                Thread.Sleep(initialSleep * 1000);
-                                
-                                //Requests for job completion or failure
-                                jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
-                                    , creds, HttpMethod.Get);
-                                if (jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
+                                //define the length of its variable fields parts
+                                limitedWhereCondition.Append(" WHERE Id IN(");
+                                int initialQueryLength = ("SELECT Id," + arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                    .Select(o => o["name"].ToString())
+                                    .Aggregate("", (c, n) => $"{c},{n}")
+                                    .TrimStart(',')
+                                    + " FROM " + currObject + " WHERE Id IN()").Length;
+                                //append to the WHERE condition as long as there are enough Ids or the length treshold is not overcome
+                                while (initialQueryLength + limitedWhereCondition.Length 
+                                    //21 is the length of the quoted Id plus comma
+                                    //but API gives an error stating it is 73 bytes longer than allowed
+                                    //obviously they count other parts of the JSON as the query hence addiotional 100 bytes
+                                    + 121 
+                                    < bulkQueryLengthLimit && indexOfId < mixedIds.Count)
                                 {
-                                    jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                    limitedWhereCondition.Append((commaFlag ? ",'" : "'") + mixedIds[indexOfId++] + "'");
+                                    commaFlag = true;
                                 }
-                                else
-                                {
-                                    jobInfo["state"] = "UnknowError";
-                                    break;
-                                }
+                                limitedWhereCondition.Append(")");
+                                runNumber++;
+                                Trace.TraceInformation($"Preparing query for run #{runNumber} from {guid}");
+                                initialSleep = 3;
                             }
-                            if (jobInfo["state"].ToString().Equals("JobComplete"))
+
+                            var jobJsonObj = new
                             {
-                                //The job has successfully completed
-                                //Need to read the CSV data
-                                jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
-                                    , creds, HttpMethod.Get, accepts: "txt/csv");
-                                //And to store the data in a CSV file if provided condition is met
-                                if (true)
+                                operation = "query",
+                                query = "SELECT Id," +
+                                //Begin with only updateable fields since it is most probable that those not allowed for bulk querying 
+                                //will be amongst them
+                                arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                    .Select(o => o["name"].ToString())
+                                //A selector condition must be added here
+                                    .Aggregate("", (c, n) => $"{c},{n}")
+                                    .TrimStart(',')
+                                + " FROM " + currObject
+                                //If needs to subset then add WHERE IN condition
+                                + limitedWhereCondition.ToString(),
+                                contentType = "CSV",
+                                columnDelimiter = "PIPE",
+                                lineEnding = "CRLF"
+                            };
+                        
+                            HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
+                                , creds, HttpMethod.Post, JsonConvert.SerializeObject(jobJsonObj));
+
+                            if(jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
+                            {
+                                JObject jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
+                            
+                                //Loop to wait till the job has completed (or failed)
+                                while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
                                 {
-                                    bool pathExists = creds.TryGetValue("targetPath", out string path);
-                                    if (pathExists)
+                                    //Every time the loop will wait twice as longer as the previous time
+                                    initialSleep *= 2;
+                                    Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
+                                    Thread.Sleep(initialSleep * 1000);
+                                
+                                    //Requests for job completion or failure
+                                    jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
+                                        , creds, HttpMethod.Get);
+                                    if (jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
                                     {
-                                        path = Path.Combine(path, $"{guid}_{currObject}.csv");
+                                        jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
                                     }
                                     else
                                     {
-                                        path = $"{guid}_{currObject}.csv";
+                                        jobInfo["state"] = "UnknowError";
+                                        break;
                                     }
-                                    using (StreamWriter streamWriter = new StreamWriter(new FileStream(path,
-                                        FileMode.CreateNew, FileAccess.Write), Encoding.UTF8))
-                                    {
-                                        streamWriter.Write(Encoding.UTF8.GetString(await jobresp.Content.ReadAsByteArrayAsync()));
-                                    }
-                                    Trace.TraceInformation($"{path} has been created");
                                 }
-                                else //some other target
+                                if (jobInfo["state"].ToString().Equals("JobComplete"))
                                 {
-                                    ;
+                                    //The job has successfully completed
+                                    //Need to read the CSV data
+                                    jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
+                                        , creds, HttpMethod.Get, accepts: "txt/csv");
+                                    //And to store the data in a CSV file if provided condition is met
+                                    if (true)
+                                    {
+                                        bool pathExists = creds.TryGetValue("targetPath", out string path);
+                                        if (pathExists)
+                                        {
+                                            path = Path.Combine(path, $"{guid}_{currObject}.csv");
+                                        }
+                                        else
+                                        {
+                                            path = $"{guid}_{currObject}.csv";
+                                        }
+                                        using (StreamWriter streamWriter = new StreamWriter(new FileStream(path,
+                                            FileMode.Append, FileAccess.Write), Encoding.UTF8))
+                                        {
+                                            if (runNumber == 1)
+                                            {
+                                                streamWriter.Write(Encoding.UTF8.GetString(await jobresp.Content.ReadAsByteArrayAsync()));
+                                            }
+                                            else
+                                            {
+                                                bool flg = false;
+                                                string inputLine;
+                                                using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
+                                                {
+                                                    while ((inputLine = inputStreamReader.ReadLine()) != null)
+                                                    {
+                                                        if (flg)
+                                                        {
+                                                            streamWriter.WriteLine(inputLine);
+                                                        }
+                                                        else 
+                                                        { 
+                                                            flg = true; 
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Trace.TraceInformation($"{path} has been created");
+                                    }
+                                    else //some other target
+                                    {
+                                        ;
+                                    }
+                                }
+                                else // Job is NOT complete
+                                {
+                                    Trace.TraceError($"Error processing Bulk job {jobInfo["id"]} for {currObject} with the state {jobInfo["state"]}");
+                                    continue;
                                 }
                             }
-                            else // Job is NOT complete
+                            else
                             {
-                                Trace.TraceError($"Error processing Bulk job {jobInfo["id"]} for {currObject} with the state {jobInfo["state"]}");
+                                Trace.TraceError($"Error creating Bulk job for {currObject}");
                                 continue;
                             }
-                        }
-                        else
-                        {
-                            Trace.TraceError($"Error creating Bulk job for {currObject}");
-                            continue;
-                        }
+                        } while (needsToSubset && indexOfId < mixedIds.Count);
                     }
                     else
                     {
                         Trace.TraceError($"{currObject} failed to read. Sending to the queue again");
-                        listOfIds.Append(currObject);
+                        listOfIds = listOfIds.Append(currObject).ToList();
                     }
                     continue;
                 }
@@ -1366,8 +1462,8 @@ namespace SalesForceAttachmentsBackupTools
 
         [Option('f', "filter", Default = null,
             HelpText = "Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;" +
-            "\ntext values must be enclosed in the single quotes." +
-            "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names",
+            "text values must be enclosed in the single quotes." +
+            "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names \"Account|Contact\"",
             MetaValue = "Id IN ('Id1', 'Id2')")]
         public string ReadModeFilter { get; set; }
 
@@ -1381,6 +1477,15 @@ namespace SalesForceAttachmentsBackupTools
             + "\nHere should be mentioned updateable objects that definitely do not contain sensitive information"
             + "\nImportant in subset mode. {\"ObjectsToExclude\":[\"Attachment\", \"Document\"]}")]
         public string PathToExcludeObjectsJson { get; set; }
+
+        [Option("subsetpercentage", Default = 100, MetaValue = "50",
+            HelpText ="Sets percentage of the subset. If not set no subsetting is done")]
+        public int SubsetPercentage { get; set; }
+
+        [Option("subsetnumofrec", Default = int.MaxValue, MetaValue = "10000",
+            HelpText ="Sets the required (not more than) number of records in the subset. If not set and no value is given to the \"subsetpercentage\"" +
+            "then no subsetting is done. The system defines the minimal value from both parameters")]
+        public int SubsetNumberOfRecords { get; set; }
     }
 
     enum SFObjectsWithAttachments

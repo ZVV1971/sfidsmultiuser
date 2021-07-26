@@ -172,10 +172,17 @@ namespace RepresentativeSubset
 {
     public class SubsetHelper<T>
     {
+        /// <summary>
+        /// Perform subsetting of the original subset by ways of shuffling and cosequent quartering
+        /// </summary>
+        /// <param name="OriginalSet"></param>
+        /// <param name="SubsetPercentage"></param>
+        /// <param name="MinNumber">The minimal required number of records to return.<para></para></param>
+        /// <returns></returns>
         public static IEnumerable<T> MakeSubset( IEnumerable<T> OriginalSet, 
             [Range(minimum: 0, maximum: 100, ErrorMessage = "Percentage out of range")] 
             int SubsetPercentage = 10, 
-            int MinNumber = 0)
+            int MinNumber = int.MaxValue)
         {
             if (SubsetPercentage <=0)
             {
@@ -186,15 +193,23 @@ namespace RepresentativeSubset
                 throw new ArgumentOutOfRangeException("SubsetPercentage", SubsetPercentage, "Argument cannot be greater than 100");
             }
 
-            List<T> ReturnValue = new List<T>();
+            List<T> ReturnValue = new List<T>(OriginalSet);
 
-            List<T> os = OriginalSet.ToList<T>();
+            int NumberOfRecords = Math.Min(MinNumber, ReturnValue.ToList<T>().Count * SubsetPercentage / 100);
 
-            int NumberOfRecords = (MinNumber == 0 || MinNumber > os.Count) ? os.Count * SubsetPercentage / 100 : MinNumber;
+            //Shuffle and take an half till the number is less or equal to the required one
+            while (ReturnValue.Count >= NumberOfRecords)
+            {
+                ReturnValue = Quarter(Shuffle(ReturnValue)) as List<T>;
+            }
 
             return ReturnValue;
         }
-
+        /// <summary>
+        /// Pefroms a kind of random mixing up of the original dataset
+        /// </summary>
+        /// <param name="OriginalSubset"></param>
+        /// <returns>IEnumerable<typeparamref name="T"/></returns>
         public static IEnumerable<T> Shuffle (IEnumerable<T> OriginalSubset)
         {
             RNGCryptoServiceProvider rngCsp = new RNGCryptoServiceProvider();
@@ -215,6 +230,11 @@ namespace RepresentativeSubset
             return rlst;
         }
         
+        /// <summary>
+        /// Performs a quartering (selecting only even parts of the subset divided in four) 
+        /// </summary>
+        /// <param name="OriginalSubset"></param>
+        /// <returns></returns>
         public static IEnumerable<T> Quarter (IEnumerable<T> OriginalSubset)
         {
             List<T> res = new List<T>();
@@ -226,5 +246,37 @@ namespace RepresentativeSubset
 
             return res;
         }
+    }
+
+    public enum SalesForceBulkJobStatus
+    {
+        /// <summary>
+        /// The job has been created, and data can be added to the job.
+        /// </summary>
+        Open,
+        /// <summary>
+        /// No new data can be added to this job.Data associated with the job may be processed after a job is closed.You cannot edit or save a closed job.
+        /// </summary>
+        Closed,
+        /// <summary>
+        /// The job has been aborted.
+        /// </summary>
+        Aborted,
+        /// <summary>
+        /// The job has failed. Data that was successfully processed in the job cannot be rolled back.
+        /// </summary>
+        Failed,
+        /// <summary>
+        /// The job was processed by Salesforce. For Bulk API 2.0 jobs only.
+        /// </summary>
+        JobComplete,
+        /// <summary>
+        /// No new data can be added to this job. You can’t edit or save a closed job. For Bulk API 2.0 jobs only.
+        /// </summary>
+        UploadComplete,
+        /// <summary>
+        /// THe job si currently being processed
+        /// </summary>
+        InProgress
     }
 }
