@@ -26,6 +26,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using System.Web;
+using Oracle.ManagedDataAccess.Client;
 
 namespace SalesForceAttachmentsBackupTools
 {
@@ -35,6 +36,8 @@ namespace SalesForceAttachmentsBackupTools
         private static string pathToKeePassDb;
         private static string groupName;
         private static string entryName;
+        private static string ORCLgroupName;
+        private static string ORCLentryName;
         private static string domainName;
         private static string objectWithAttachments;
         private static string resultFileName;
@@ -103,6 +106,16 @@ namespace SalesForceAttachmentsBackupTools
                         }
                         if (workingMode == WorkingModes.Subset)
                         {
+                            if (opt.ORCLEntryName == null || opt.ORCLEntryName.Equals(String.Empty)
+                                || opt.ORCLGroupName == null || opt.ORCLGroupName.Equals(String.Empty))
+                            {
+                                Trace.TraceError($"If workmode is set to Subset then credentials to connect to an Oracle instance must be provided.");
+                                WaitExitingCountdown(waittime);
+                                Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                                return 0;
+                            }
+                            ORCLentryName = opt.ORCLEntryName;
+                            ORCLgroupName = opt.ORCLGroupName;
                             filter = opt.ReadModeFilter;
                             if (opt.SubsetNumberOfRecords <= 0 || opt.SubsetPercentage > 100)
                             {
@@ -114,6 +127,7 @@ namespace SalesForceAttachmentsBackupTools
                                 Trace.TraceWarning("Minimal number of recods cannot be negative; using default value"); 
                             }
                             else minNumberOfRecords = opt.SubsetNumberOfRecords;
+                            
                         }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
@@ -130,9 +144,30 @@ namespace SalesForceAttachmentsBackupTools
             //Open KeePass (needed for every operation) and store credentials in the dictionary
             //This is done with regard that the KDBX file could be protected by Windows credentials
             //starting from some new versions as well.
+            SecureString secString = new SecureString();
+            if (!useWindowsLogon) secString = ReadPasswordFromConsole();
             credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(
-                    useWindowsLogon ? (new SecureString()) : ReadPasswordFromConsole(), useWindowsLogon));
+                    secString, pathToKeePassDb, groupName, entryName, useWindowsLogon));
             Trace.TraceInformation($"Got {credentialsDict.Count} credentials");
+            if (workingMode == WorkingModes.Subset)
+            {
+                foreach(KeyValuePair<string, ProtectedString> kv in OpenKeePassDB(
+                    secString, pathToKeePassDb, ORCLgroupName, ORCLentryName, useWindowsLogon))
+                {
+                    credentialsDict.Add("ORCL" + kv.Key, kv.Value);
+                }
+
+                if (credentialsDict.Where(t => t.Key.StartsWith("ORCL")).Count() < 3)
+                {
+                    Trace.TraceError("Not enough credentials to work in Subset mode. Oracle credentials weren't found in the KDBX.");
+                    WaitExitingCountdown(waittime);
+                    Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                }
+                else
+                {
+                    Trace.TraceInformation("Got 3 supplementary credentials to connect to an Oracle instance");
+                }
+            }
 
             //Check whether the number of credentials and their names are enough depending on the workmode
             switch (workingMode)
@@ -275,7 +310,8 @@ namespace SalesForceAttachmentsBackupTools
                     for (int i = 0; i < numberOfThreads; i++)
                     {
                         tasks.Add(Task.Run(
-                            () => doWork(listOfIds, salesForceSID)));
+                            () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.StartsWith("ORCL")).ToDictionary(k=>k.Key, k=>k.Value)
+                            )));
                     }
                     Task.WaitAll(tasks.ToArray());
                     break;
@@ -516,7 +552,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="listOfIds">List of objects to be processed</param>
         /// <param name="creds">credentials</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string, ProtectedString> ORCLcreds)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
@@ -525,6 +561,9 @@ namespace SalesForceAttachmentsBackupTools
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage resp = null;
+            StringBuilder createSQL = new StringBuilder();
+            StringBuilder createCTL = new StringBuilder();
+
             do
             {
                 //Initialize variables for every object
@@ -533,11 +572,22 @@ namespace SalesForceAttachmentsBackupTools
                 currentId = psid.GetCurrentID();
                 mixedIds.Clear();
                 needsToSubset = false;
-
+                createSQL.Clear();
+                createCTL.Clear();
+                Task ORCLTask = null;
+                ProcessStartInfo processStartInfo = null;
 
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
                     string currObject = (listOfIds.ToList())[currentId];
+                    createSQL.Append($"CREATE TABLE T{currentId}_{guid.ToString("N").ToUpper()} (Id VARCHAR2(18) NOT NULL");
+                    createCTL.Append("OPTIONS (SKIP=1, ROWS=5000)" +
+                                        "\nLOAD DATA" +
+                                        "\nTRUNCATE" +
+                                        $"\nINTO TABLE T{currentId}_{guid.ToString("N").ToUpper()}" +
+                                        $"\nFIELDS TERMINATED BY '|' OPTIONALLY ENCLOSED BY '\"'" +
+                                        "\n(id char"
+                                    );
 
                     //Getting number of records in the current object
                     try
@@ -583,7 +633,7 @@ namespace SalesForceAttachmentsBackupTools
                                 {
                                     //Every time the loop will wait twice as longer as the previous time
                                     initialSleep *= 2;
-                                    Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
+                                    Trace.TraceInformation($"Thread {guid} is sleep for {initialSleep} seconds then check results...");
                                     Thread.Sleep(initialSleep * 1000);
 
                                     //Requests for job completion or failure
@@ -706,7 +756,37 @@ namespace SalesForceAttachmentsBackupTools
                                 columnDelimiter = "PIPE",
                                 lineEnding = "CRLF"
                             };
-                        
+
+                            //Continue to compose a SQL query to create a table
+                            foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                    .Select(o => o["name"].ToString()))
+                            {
+                                createSQL.Append($",{s} VARCHAR2(4000)");
+                                createCTL.Append($",\n{s} char \"SUBSTR(:{s},1,4000)\"");
+                            }
+                            createSQL.Append(")");
+                            createCTL.Append(")");
+
+                            //Run table creation task in an async mode with no await
+                            if (runNumber <= 1)
+                            {
+                                Trace.TraceInformation($"Create a table in the Oracle instance to hold the data of the {currObject} from {guid}");
+                                ORCLTask = Task.Run(() =>
+                                {
+                                    using (OracleConnection oc = new OracleConnection())
+                                    {
+                                        oc.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; Password={ORCLcreds["ORCLPassword"].ReadString()}; Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
+                                        oc.Open();
+                                        OracleCommand ocmd = new OracleCommand(createSQL.ToString(), oc);
+                                        ocmd.ExecuteNonQuery();
+                                    //Add a comment to the table where to define the current object
+                                    ocmd.CommandText = $"COMMENT ON TABLE T{currentId}_{guid.ToString("N").ToUpper()} IS '{currObject}'";
+                                        ocmd.ExecuteNonQuery();
+                                        oc.Close();
+                                    }
+                                });
+                            }
+
                             HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
                                 , creds, HttpMethod.Post, JsonConvert.SerializeObject(jobJsonObj));
 
@@ -742,50 +822,78 @@ namespace SalesForceAttachmentsBackupTools
                                     //Need to read the CSV data
                                     jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
                                         , creds, HttpMethod.Get, accepts: "txt/csv");
-                                    //And to store the data in a CSV file if provided condition is met
-                                    if (true)
+                                //And to store the data in a CSV file if provided condition is met
+                                    bool pathExists = creds.TryGetValue("targetPath", out string path);
+                                    if (pathExists)
                                     {
-                                        bool pathExists = creds.TryGetValue("targetPath", out string path);
-                                        if (pathExists)
+                                        path = Path.Combine(path, $"{guid}_{currObject}.csv");
+                                    }
+                                    else
+                                    {
+                                        path = $"{guid}_{currObject}.csv";
+                                    }
+                                    string csv_path = path;
+                                    using (StreamWriter streamWriter = new StreamWriter(new FileStream(path,
+                                        FileMode.Append, FileAccess.Write), Encoding.UTF8))
+                                    {
+                                        //For the first or zeroth run store the whole stream as a file -- no need to skip the header
+                                        if (runNumber <= 1)
                                         {
-                                            path = Path.Combine(path, $"{guid}_{currObject}.csv");
+                                            streamWriter.Write(Encoding.UTF8.GetString(await jobresp.Content.ReadAsByteArrayAsync()));
                                         }
                                         else
                                         {
-                                            path = $"{guid}_{currObject}.csv";
-                                        }
-                                        using (StreamWriter streamWriter = new StreamWriter(new FileStream(path,
-                                            FileMode.Append, FileAccess.Write), Encoding.UTF8))
-                                        {
-                                            if (runNumber == 1)
+                                            bool flg = false;
+                                            string inputLine;
+                                            using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
                                             {
-                                                streamWriter.Write(Encoding.UTF8.GetString(await jobresp.Content.ReadAsByteArrayAsync()));
-                                            }
-                                            else
-                                            {
-                                                bool flg = false;
-                                                string inputLine;
-                                                using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
+                                                while ((inputLine = inputStreamReader.ReadLine()) != null)
                                                 {
-                                                    while ((inputLine = inputStreamReader.ReadLine()) != null)
+                                                    if (flg)
                                                     {
-                                                        if (flg)
-                                                        {
-                                                            streamWriter.WriteLine(inputLine);
-                                                        }
-                                                        else 
-                                                        { 
-                                                            flg = true; 
-                                                        }
+                                                        streamWriter.WriteLine(inputLine);
+                                                    }
+                                                    else 
+                                                    { 
+                                                        flg = true; 
                                                     }
                                                 }
                                             }
                                         }
-                                        Trace.TraceInformation($"{path} has been created");
                                     }
-                                    else //some other target
+                                    Trace.TraceInformation($"{path} has been created");
+
+                                    //It should be done on the LAST run!
+                                    if (runNumber <= 1)
                                     {
-                                        ;
+                                        pathExists = creds.TryGetValue("targetPath", out path);
+                                        if (pathExists)
+                                        {
+                                            path = Path.Combine(path, $"{guid}_{currObject}.ctl");
+                                        }
+                                        else
+                                        {
+                                            path = $"{guid}_{currObject}.ctl";
+                                        }
+                                        if (ORCLTask?.Status == TaskStatus.RanToCompletion)
+                                        {
+                                            Trace.TraceInformation($"Table to hold {currObject} has been created by {guid}. Writing CTRL file for SQLLDR"); ;
+                                            using (StreamWriter stream = new StreamWriter(new FileStream(path, FileMode.Create, FileAccess.Write), Encoding.ASCII))
+                                            {
+                                                stream.Write(createCTL.ToString());
+                                            }
+
+                                            processStartInfo = new ProcessStartInfo(Path.Combine(Directory.GetCurrentDirectory(), "sqlldr.exe"));
+                                            processStartInfo.Arguments = $"'{ORCLcreds["ORCLUserName"].ReadString()}/\"{ORCLcreds["ORCLPassword"].ReadString()}\"" +
+                                                $"@{ORCLcreds["ORCLDataSource"].ReadString()}'" +
+                                                $" control=\"{path}\" data=\"{csv_path}\" log=\"{csv_path}.log\" direct=true";
+                                            processStartInfo.CreateNoWindow = true;
+                                            processStartInfo.UseShellExecute = false;
+                                        }
+                                        else
+                                        {
+                                            Trace.TraceWarning($"Creation of the table in the Oracle instance has failed. {guid} can't insert data in RDB");
+                                        }
                                     }
                                 }
                                 else // Job is NOT complete
@@ -800,6 +908,7 @@ namespace SalesForceAttachmentsBackupTools
                                 continue;
                             }
                         } while (needsToSubset && indexOfId < mixedIds.Count);
+                        Process processChild = Process.Start(processStartInfo);
                     }
                     else
                     {
@@ -1076,7 +1185,8 @@ namespace SalesForceAttachmentsBackupTools
 
         }
 
-        private static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password, bool UseWinLogon = false)
+        private static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password, string pathKDBX, 
+            string grpName, string entrName, bool UseWinLogon = false)
         {
             PwDatabase PwDB = new PwDatabase();
             IOConnectionInfo mioInfo = new IOConnectionInfo
@@ -1173,12 +1283,12 @@ namespace SalesForceAttachmentsBackupTools
                 {
                     foreach (PwGroup grp in groups)
                     {
-                        if (grp.Name.Equals(groupName))
+                        if (grp.Name.Equals(grpName))
                         {
                             PwObjectList<PwEntry> entries = grp.GetEntries(false);
                             foreach (PwEntry ent in entries)
                             {
-                                if (ent.Strings.ReadSafe("Title").Equals(entryName))
+                                if (ent.Strings.ReadSafe("Title").Equals(entrName))
                                 {
                                     dict.Add("Salt", new ProtectedString(true, ent.Strings.ReadSafe("Salt")));
                                     dict.Add("Password", new ProtectedString(true, ent.Strings.ReadSafe("Password")));
@@ -1186,6 +1296,7 @@ namespace SalesForceAttachmentsBackupTools
                                     dict.Add("UserName", new ProtectedString(true, ent.Strings.ReadSafe("UserName")));
                                     dict.Add("IV", new ProtectedString(true, ent.Strings.ReadSafe("IV")));
                                     dict.Add("SecurityToken", new ProtectedString(true, ent.Strings.ReadSafe("SecurityToken")));
+                                    dict.Add("DataSource", new ProtectedString(true, ent.Strings.ReadSafe("DataSource")));
                                 }
                             }
                         }
@@ -1464,7 +1575,7 @@ namespace SalesForceAttachmentsBackupTools
             HelpText = "Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;" +
             "text values must be enclosed in the single quotes." +
             "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names \"Account|Contact\"",
-            MetaValue = "Id IN ('Id1', 'Id2')")]
+            MetaValue = "Id IN ('Id1','Id2')")]
         public string ReadModeFilter { get; set; }
 
         [Option('w', "winauth", Default = 0,
@@ -1479,13 +1590,21 @@ namespace SalesForceAttachmentsBackupTools
         public string PathToExcludeObjectsJson { get; set; }
 
         [Option("subsetpercentage", Default = 100, MetaValue = "50",
-            HelpText ="Sets percentage of the subset. If not set no subsetting is done")]
+            HelpText ="Sets percentage of the subset. If not set then no subsetting is done and the whole object is processed.")]
         public int SubsetPercentage { get; set; }
 
         [Option("subsetnumofrec", Default = int.MaxValue, MetaValue = "10000",
-            HelpText ="Sets the required (not more than) number of records in the subset. If not set and no value is given to the \"subsetpercentage\"" +
-            "then no subsetting is done. The system defines the minimal value from both parameters")]
+            HelpText ="Sets the required (not more than) number of records in the subset. If not set and no value is given to the "+
+            "\n\"subsetpercentage\" then no subsetting is done. The system defines the minimal value from both parameters")]
         public int SubsetNumberOfRecords { get; set; }
+
+        [Option("orclgroupname", MetaValue = "EPAM_ORCL",
+            HelpText = "Gives the name of the group where the ORCL credentials must be looked for")]
+        public string ORCLGroupName { get; set; }
+        
+        [Option("orclentryname", MetaValue = "EPAM_ORCL",
+            HelpText = "Gives the name of the entry where the ORCL credentials must be looked for")]
+        public string ORCLEntryName { get; set; }
     }
 
     enum SFObjectsWithAttachments
