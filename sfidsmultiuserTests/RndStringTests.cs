@@ -104,5 +104,44 @@ namespace RepresentativeSubset.Tests
 
             Assert.IsTrue(watch.ElapsedMilliseconds <= 100, "The execution took {0} miliseconds", watch.ElapsedMilliseconds);
         }
+
+        [TestMethod("Check number of returned records for a comparatively big array ~1.000.000")]
+        public void CheckNumberOfRecordsMakeSubset_LessOrEqual()
+        {
+            int requiredCount = 499000;
+            string[] array1 = new string[1000000];
+            for (int i = 0; i < array1.Length; i++) array1[i] = i.ToString();
+
+            IEnumerable<string> res = SubsetHelper<string>.MakeSubset(array1, MinNumber: requiredCount);
+
+            Assert.IsTrue(res.Count() <= requiredCount, $"The count is {res.Count()}");
+        }
+
+        [TestMethod("Check correctness of subset parameters - according to the minimal number")]
+        public void CheckCorectnessOfSubsetParameters_MinNumber ()
+        {
+            int requiredCount = 4990;
+            string[] array1 = new string[10000];
+            for (int i = 0; i < array1.Length; i++) array1[i] = i.ToString();
+
+            IEnumerable<string> res = SubsetHelper<string>.MakeSubset(array1, SubsetPercentage: 50, MinNumber: requiredCount);
+
+            Assert.IsTrue(res.Count() <= requiredCount, $"The count is {res.Count()}");
+        }
+
+        [TestMethod("Check correctness of subset parameters - according to the subset percentage")]
+        public void CheckCorectnessOfSubsetParameters_SubsetPercentage()
+        {
+            int requiredCount = 4990;
+            int perc = 40;
+            int numberOfRecords = 100000;
+            string[] array1 = new string[numberOfRecords];
+            for (int i = 0; i < array1.Length; i++) array1[i] = i.ToString();
+
+            IEnumerable<string> res = SubsetHelper<string>.MakeSubset(array1, SubsetPercentage: perc, MinNumber: requiredCount);
+
+            Assert.IsTrue(res.Count() <= requiredCount, $"The count is {res.Count()}");
+            Assert.IsTrue(res.Count() <= numberOfRecords * perc / 100);
+        }
     }
 }

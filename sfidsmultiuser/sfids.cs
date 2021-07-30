@@ -7,6 +7,7 @@ using System.Threading;
 using System.Security.Cryptography;
 using System.Linq;
 using System.ComponentModel.DataAnnotations;
+using System.Collections;
 
 namespace AsyncSalesForceAttachments
 {
@@ -166,16 +167,156 @@ namespace AsyncSalesForceAttachments
             return stringChars.ToString();
         }
     }
+
+    public class ConcurrentList<T> : IList<T>
+    {
+        #region Fields
+
+        private IList<T> _internalList;
+
+        private readonly object lockObject = new object();
+
+        #endregion
+
+        #region ctor
+
+        public ConcurrentList()
+        {
+            _internalList = new List<T>();
+        }
+
+        public ConcurrentList(int capacity)
+        {
+            _internalList = new List<T>(capacity);
+        }
+
+        public ConcurrentList(IEnumerable<T> list)
+        {
+            _internalList = list.ToList();
+        }
+
+        #endregion
+
+        public T this[int index]
+        {
+            get
+            {
+                return LockInternalListAndGet(l => l[index]);
+            }
+
+            set
+            {
+                LockInternalListAndCommand(l => l[index] = value);
+            }
+        }
+
+        public int Count
+        {
+            get
+            {
+                return LockInternalListAndQuery(l => l.Count());
+            }
+        }
+
+        public bool IsReadOnly => false;
+
+        public void Add(T item)
+        {
+            LockInternalListAndCommand(l => l.Add(item));
+        }
+
+        public void Clear()
+        {
+            LockInternalListAndCommand(l => l.Clear());
+        }
+
+        public bool Contains(T item)
+        {
+            return LockInternalListAndQuery(l => l.Contains(item));
+        }
+
+        public void CopyTo(T[] array, int arrayIndex)
+        {
+            LockInternalListAndCommand(l => l.CopyTo(array, arrayIndex));
+        }
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            return LockInternalListAndQuery(l => l.GetEnumerator());
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            lock (lockObject)
+            {
+                return ((IEnumerable)_internalList).GetEnumerator();
+            }
+        }
+
+        public int IndexOf(T item)
+        {
+            return LockInternalListAndQuery(l => l.IndexOf(item));
+        }
+
+        public void Insert(int index, T item)
+        {
+            LockInternalListAndCommand(l => l.Insert(index, item));
+        }
+
+        public bool Remove(T item)
+        {
+            return LockInternalListAndQuery(l => l.Remove(item));
+        }
+
+        public void RemoveAt(int index)
+        {
+            LockInternalListAndCommand(l => l.RemoveAt(index));
+        }
+
+        #region Utilities
+
+        protected virtual void LockInternalListAndCommand(Action<IList<T>> action)
+        {
+            lock (lockObject)
+            {
+                action(_internalList);
+            }
+        }
+
+        protected virtual T LockInternalListAndGet(Func<IList<T>, T> func)
+        {
+            lock (lockObject)
+            {
+                return func(_internalList);
+            }
+        }
+
+        protected virtual TObject LockInternalListAndQuery<TObject>(Func<IList<T>, TObject> query)
+        {
+            lock (lockObject)
+            {
+                return query(_internalList);
+            }
+        }
+        #endregion
+    }
 }
 
 namespace RepresentativeSubset
 {
     public class SubsetHelper<T>
     {
+        /// <summary>
+        /// Perform subsetting of the original subset by ways of shuffling and cosequent quartering
+        /// </summary>
+        /// <param name="OriginalSet"></param>
+        /// <param name="SubsetPercentage"></param>
+        /// <param name="MinNumber">The minimal required number of records to return.<para></para></param>
+        /// <returns></returns>
         public static IEnumerable<T> MakeSubset( IEnumerable<T> OriginalSet, 
             [Range(minimum: 0, maximum: 100, ErrorMessage = "Percentage out of range")] 
             int SubsetPercentage = 10, 
-            int MinNumber = 0)
+            int MinNumber = int.MaxValue)
         {
             if (SubsetPercentage <=0)
             {
@@ -186,15 +327,23 @@ namespace RepresentativeSubset
                 throw new ArgumentOutOfRangeException("SubsetPercentage", SubsetPercentage, "Argument cannot be greater than 100");
             }
 
-            List<T> ReturnValue = new List<T>();
+            List<T> ReturnValue = new List<T>(OriginalSet);
 
-            List<T> os = OriginalSet.ToList<T>();
+            int NumberOfRecords = Math.Min(MinNumber, ReturnValue.ToList<T>().Count * SubsetPercentage / 100);
 
-            int NumberOfRecords = (MinNumber == 0 || MinNumber > os.Count) ? os.Count * SubsetPercentage / 100 : MinNumber;
+            //Shuffle and take an half till the number is less or equal to the required one
+            while (ReturnValue.Count >= NumberOfRecords)
+            {
+                ReturnValue = Quarter(Shuffle(ReturnValue)) as List<T>;
+            }
 
             return ReturnValue;
         }
-
+        /// <summary>
+        /// Pefroms a kind of random mixing up of the original dataset
+        /// </summary>
+        /// <param name="OriginalSubset"></param>
+        /// <returns>IEnumerable<typeparamref name="T"/></returns>
         public static IEnumerable<T> Shuffle (IEnumerable<T> OriginalSubset)
         {
             RNGCryptoServiceProvider rngCsp = new RNGCryptoServiceProvider();
@@ -215,6 +364,11 @@ namespace RepresentativeSubset
             return rlst;
         }
         
+        /// <summary>
+        /// Performs a quartering (selecting only even parts of the subset divided in four) 
+        /// </summary>
+        /// <param name="OriginalSubset"></param>
+        /// <returns></returns>
         public static IEnumerable<T> Quarter (IEnumerable<T> OriginalSubset)
         {
             List<T> res = new List<T>();
@@ -226,5 +380,37 @@ namespace RepresentativeSubset
 
             return res;
         }
+    }
+
+    public enum SalesForceBulkJobStatus
+    {
+        /// <summary>
+        /// The job has been created, and data can be added to the job.
+        /// </summary>
+        Open,
+        /// <summary>
+        /// No new data can be added to this job.Data associated with the job may be processed after a job is closed.You cannot edit or save a closed job.
+        /// </summary>
+        Closed,
+        /// <summary>
+        /// The job has been aborted.
+        /// </summary>
+        Aborted,
+        /// <summary>
+        /// The job has failed. Data that was successfully processed in the job cannot be rolled back.
+        /// </summary>
+        Failed,
+        /// <summary>
+        /// The job was processed by Salesforce. For Bulk API 2.0 jobs only.
+        /// </summary>
+        JobComplete,
+        /// <summary>
+        /// No new data can be added to this job. You can’t edit or save a closed job. For Bulk API 2.0 jobs only.
+        /// </summary>
+        UploadComplete,
+        /// <summary>
+        /// THe job si currently being processed
+        /// </summary>
+        InProgress
     }
 }

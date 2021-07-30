@@ -25,6 +25,8 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
+using System.Web;
+using Oracle.ManagedDataAccess.Client;
 
 namespace SalesForceAttachmentsBackupTools
 {
@@ -34,6 +36,8 @@ namespace SalesForceAttachmentsBackupTools
         private static string pathToKeePassDb;
         private static string groupName;
         private static string entryName;
+        private static string ORCLgroupName;
+        private static string ORCLentryName;
         private static string domainName;
         private static string objectWithAttachments;
         private static string resultFileName;
@@ -41,14 +45,17 @@ namespace SalesForceAttachmentsBackupTools
         private static string filter;
         private static string pathToJSONfile;
         private static int numberOfThreads;
+        private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
+        private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
+        private static int bulkQueryLengthLimit = 100000;           //The limit imposed by the SalesForce on the bulk query length
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
         private static List<string> listOfIds = null;
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
-        private static TimeSpan waittime = TimeSpan.FromSeconds(30);
+        private static TimeSpan waittime = TimeSpan.FromSeconds(30);                            //Time to wait before console closure
         private static ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener();
-        private static bool useWindowsLogon = false;
+        private static bool useWindowsLogon = false;                                            //Use windows authentication to open KBDX
         private static SymmetricAlgorithm cipher;
         private static Dictionary<string, ProtectedString> credentialsDict;
         #endregion fields
@@ -75,7 +82,11 @@ namespace SalesForceAttachmentsBackupTools
                         Trace.Listeners.Add(new TextWriterTraceListener(opt.LogFilePath, "Backup_fileTracer"));
                         Trace.Listeners["Backup_fileTracer"].TraceOutputOptions |= TraceOptions.DateTime;
                     }
-                    if (opt.LogToConsole != 0) Trace.Listeners.Add(consoleTraceListener);
+                    if (opt.LogToConsole != 0)
+                    {
+                        consoleTraceListener.TraceOutputOptions = TraceOptions.DateTime;
+                        Trace.Listeners.Add(consoleTraceListener);
+                    }
                     Trace.AutoFlush = true;
                     Trace.Listeners.Remove("Default");
                     if (workingMode == WorkingModes.Compare &&
@@ -91,11 +102,32 @@ namespace SalesForceAttachmentsBackupTools
                         pathToComparisonResults = opt.ComparisonResultsFilePath;
                         if (workingMode == WorkingModes.Read)
                         {
-                            filter = "+WHERE+" + opt.ReadModeFilter;
+                            filter = HttpUtility.UrlEncode(" WHERE " + opt.ReadModeFilter, Encoding.ASCII);
                         }
                         if (workingMode == WorkingModes.Subset)
                         {
+                            if (opt.ORCLEntryName == null || opt.ORCLEntryName.Equals(String.Empty)
+                                || opt.ORCLGroupName == null || opt.ORCLGroupName.Equals(String.Empty))
+                            {
+                                Trace.TraceError($"If workmode is set to Subset then credentials to connect to an Oracle instance must be provided.");
+                                WaitExitingCountdown(waittime);
+                                Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                                return 0;
+                            }
+                            ORCLentryName = opt.ORCLEntryName;
+                            ORCLgroupName = opt.ORCLGroupName;
                             filter = opt.ReadModeFilter;
+                            if (opt.SubsetNumberOfRecords <= 0 || opt.SubsetPercentage > 100)
+                            {
+                                Trace.TraceWarning("Percentage range is invalid; using default value");
+                            }
+                            else percentForSubset = opt.SubsetPercentage;
+                            if (opt.SubsetNumberOfRecords <= 0) 
+                            { 
+                                Trace.TraceWarning("Minimal number of recods cannot be negative; using default value"); 
+                            }
+                            else minNumberOfRecords = opt.SubsetNumberOfRecords;
+                            
                         }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
@@ -112,36 +144,65 @@ namespace SalesForceAttachmentsBackupTools
             //Open KeePass (needed for every operation) and store credentials in the dictionary
             //This is done with regard that the KDBX file could be protected by Windows credentials
             //starting from some new versions as well.
+            SecureString secString = new SecureString();
+            if (!useWindowsLogon) secString = ReadPasswordFromConsole();
             credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(
-                    useWindowsLogon ? (new SecureString()) : ReadPasswordFromConsole(), useWindowsLogon));
+                    secString, pathToKeePassDb, groupName, entryName, useWindowsLogon));
             Trace.TraceInformation($"Got {credentialsDict.Count} credentials");
+            if (workingMode == WorkingModes.Subset)
+            {
+                foreach(KeyValuePair<string, ProtectedString> kv in OpenKeePassDB(
+                    secString, pathToKeePassDb, ORCLgroupName, ORCLentryName, useWindowsLogon))
+                {
+                    credentialsDict.Add("ORCL" + kv.Key, kv.Value);
+                }
+
+                if (credentialsDict.Where(t => t.Key.StartsWith("ORCL")).Count() < 3)
+                {
+                    Trace.TraceError("Not enough credentials to work in Subset mode. Oracle credentials weren't found in the KDBX.");
+                    WaitExitingCountdown(waittime);
+                    Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                }
+                else
+                {
+                    Trace.TraceInformation("Got 3 supplementary credentials to connect to an Oracle instance");
+                }
+            }
 
             //Check whether the number of credentials and their names are enough depending on the workmode
-            if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3
-                && workingMode != WorkingModes.Prepare
-                && workingMode != WorkingModes.Subset)
+            switch (workingMode)
             {
-                Trace.TraceError("Necessary cryptographic input is absent in the provided entry in the KDBX.");
-                WaitExitingCountdown(waittime);
-                Environment.Exit((int)ExitCodes.CryptographicStuffAbsenseError);
-                return;
-            }
-            else if (workingMode == WorkingModes.Prepare)
-            {
-                Trace.TraceInformation("Preparation of KDBX has been successfully completed");
-                WaitExitingCountdown(waittime);
-                return;
-            }
-            else if (workingMode == WorkingModes.Subset
-                 && credentialsDict.Where(t => t.Key == "UserName" || t.Key == "Password").Count() == 2)
-            {
-                Trace.TraceInformation("Got username and password from the given KeePass file");
-            }
-            else
-            {
-                Trace.TraceError("Unknown error occured");
-                Environment.Exit((int)ExitCodes.UnknownError);
-                return;
+                case WorkingModes.Read:
+                case WorkingModes.Write:
+                case WorkingModes.Compare:
+                    if (credentialsDict.Where(t => t.Key == "IV" || t.Key == "AESPass" || t.Key == "Salt").Count() < 3)
+                    {
+                        Trace.TraceError("Insufficient cryptographic stuff; Either IV, Password for encryption or Salt records are absent in the given group/entity");
+                        WaitExitingCountdown(waittime);
+                        Environment.Exit((int)ExitCodes.CryptographicStuffAbsenseError);
+                        return;
+                    }
+                    else if(credentialsDict.Where(t => t.Key == "UserName" || t.Key == "Password").Count() < 2)
+                    {
+                        Trace.TraceError("Either Password or UserName are absent in the given group/entity");
+                        WaitExitingCountdown(waittime);
+                        Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                        return;
+                    }
+                    Trace.TraceInformation("Credentials and cryptographic stuff seem to be OK");
+                    break;
+                case WorkingModes.Subset:
+                    if (credentialsDict.Where(t => t.Key == "UserName" || t.Key == "Password").Count() < 2)
+                    {
+                        Trace.TraceError("Either Password or UserName are absent in the given group/entity");
+                        WaitExitingCountdown(waittime);
+                        Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                        return;
+                    }
+                    Trace.TraceInformation("Credentials and cryptographic stuff seem to be OK");
+                    break;
+                default:
+                    break;
             }
 
             //Connect to the SalesForce org and store the results in a dictionary
@@ -233,7 +294,10 @@ namespace SalesForceAttachmentsBackupTools
                     }
                     break;
                 case WorkingModes.Subset:
-                    if (pathToJSONfile != null) salesForceSID.Add("pathToJson", pathToJSONfile);
+                    if (pathToJSONfile != null && !pathToJSONfile.Equals(String.Empty)) 
+                    { 
+                        salesForceSID.Add("pathToJson", pathToJSONfile); 
+                    }
                     listOfIds = (await GetListOfObjects(salesForceSID, filter)).ToList<string>();
 
                     //If target folder or file path has been given store absolute folder path to the dictionary
@@ -243,15 +307,54 @@ namespace SalesForceAttachmentsBackupTools
                         {
                             salesForceSID.Add("targetPath", Path.GetDirectoryName(pathToComparisonResults));
                         }
-                        catch { }
+                        catch 
+                        {
+                            Trace.TraceError("Error handling target path. Set to the local script folder");
+                            salesForceSID.Add("targetPath", Directory.GetCurrentDirectory());
+                        }
                     }
                     Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
+                    
+                    //Pass a new list to each thread to get the files that need to be cleared up
+                    ConcurrentList<string> cleanUpList = new ConcurrentList<string>(numberOfThreads * 2);
+                    ConcurrentList<Process> sqlldrTasks = new ConcurrentList<Process>(numberOfThreads * 2);
                     for (int i = 0; i < numberOfThreads; i++)
                     {
                         tasks.Add(Task.Run(
-                            () => doWork(listOfIds, salesForceSID)));
+                            () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.StartsWith("ORCL")).ToDictionary(k=>k.Key, k=>k.Value),
+                            cleanUpList, sqlldrTasks
+                            )));
                     }
                     Task.WaitAll(tasks.ToArray());
+                    Trace.TraceInformation("Waiting for all SQLLDR processes to finish...");
+                    foreach (Process p in sqlldrTasks) 
+                    { 
+                        p.WaitForExit();
+                        Trace.TraceInformation($"The process {p.Id} has finished with the exit code {p.ExitCode}");
+                        switch (p.ExitCode)
+                        {
+                            case 0:
+                                Trace.TraceInformation($"SQLLDR has successfully uploaded all the rows in the process {p.Id}");
+                                break;
+                            case 1:
+                                Trace.TraceWarning($"The process {p.Id} has failed due to Command-line or syntax errors");
+                                break;
+                            case 2:
+                                Trace.TraceWarning($"The process {p.Id} has erroneous rows please find the corresponding .BAD file," +
+                                    $" look into it to find the cause and delete afterwards since it may contain the sensitive information");
+                                break;
+                            case 3:
+                                Trace.TraceWarning($"The process {p.Id} has failed due to Operating system errors (such as file open/close and malloc)");
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    Trace.TraceInformation("Initialising clean-up procedure; delete all the CSV and CTL files");
+                    foreach (string cleanObj in cleanUpList)
+                    {
+                        Process.Start("CMD.EXE",$"/C del {cleanObj}");
+                    }
                     break;
                 default:
                     break;
@@ -291,6 +394,7 @@ namespace SalesForceAttachmentsBackupTools
             {
                 try
                 {
+                    //An array of JTokens to collect SF objects described in the manner as in the org's json to add to the exclude array
                     List<JToken> tk = new List<JToken>();
                     JObject data = JObject.Parse(File.ReadAllText(path));
                     foreach(JToken j in JArray.Parse(data["ObjectsToExclude"].ToString()))
@@ -305,10 +409,10 @@ namespace SalesForceAttachmentsBackupTools
             List<string> lst = new List<string>();
             if (flt == null)
             {
+                Trace.TraceInformation("No filter is given adding all the possible objects to the list");
                 foreach (JToken j in arr.Where(t => t["updateable"].ToString().Equals("True"))
                     .Except(excludeArray))
                 {
-                    Trace.TraceInformation("No filter is given adding all the possible objects to the list");
                     lst.Add(j["name"].ToString());
                 }
             }
@@ -489,19 +593,141 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="listOfIds">List of objects to be processed</param>
         /// <param name="creds">credentials</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string
+            , ProtectedString> ORCLcreds, IList<string> cleanList, IList<Process> sqlldrProcesses)
         {
             SynchronizedIds psid = new SynchronizedIds();
-            int currentId;
+            int currentId, initialSleep, numberOfRecords;
+            List<string> mixedIds = new List<string>();
+            bool needsToSubset;
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage resp = null;
+            StringBuilder createSQL = new StringBuilder();
+            StringBuilder createCTL = new StringBuilder();
+
             do
             {
+                //Initialize variables for every object
+                initialSleep = 3;
+                numberOfRecords = int.MaxValue;
                 currentId = psid.GetCurrentID();
+                mixedIds.Clear();
+                needsToSubset = false;
+                createSQL.Clear();
+                createCTL.Clear();
+                Task ORCLTask = null;
+                ProcessStartInfo processStartInfo = null;
+
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
                     string currObject = (listOfIds.ToList())[currentId];
+                    createSQL.Append($"CREATE TABLE T{guid.ToString("N").Substring(0,4)}_{currObject} (Id VARCHAR2(18) NOT NULL");
+                    createCTL.Append("OPTIONS (SKIP=1, ROWS=5000)" +
+                                        "\nLOAD DATA" +
+                                        "\nTRUNCATE" +
+                                        $"\nINTO TABLE T{guid.ToString("N").Substring(0, 4)}_{currObject}" +
+                                        $"\nFIELDS TERMINATED BY '|' OPTIONALLY ENCLOSED BY '\"'" +
+                                        "\n(id char"
+                                    );
+
+                    //Getting number of records in the current object
+                    try
+                    {
+                        Trace.TraceInformation($"Sending request to get the number of records in the {currObject}");
+                        resp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/query/?q=" + 
+                            HttpUtility.UrlEncode($"SELECT count(Id) FROM {currObject}", Encoding.ASCII)), creds, HttpMethod.Get, null);
+                        if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
+                        {
+                            if (Int32.TryParse(JObject.Parse(await resp.Content.ReadAsStringAsync())["records"][0]["expr0"].ToString()
+                                , out numberOfRecords)) 
+                            {
+                                Trace.TraceInformation($"Number of records in the {currObject} is {numberOfRecords} - got by {guid}");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Trace.TraceWarning($"Error reading number of lines for the {currObject} from {guid} {ex.Message}");
+                        Trace.TraceWarning($"No subsetting will be done for {currObject} from {guid}");
+                    }
+
+                    //Determine if the subsetting of the object need to be performed
+                    if (numberOfRecords >= minNumberOfRecords || percentForSubset < 100)
+                    {
+                        needsToSubset = true;
+                        var jsonObj = new
+                        {
+                            operation = "query",
+                            query = $"SELECT Id FROM {currObject}"
+                        };
+                        try
+                        {
+                            Trace.TraceInformation($"Sending request to SF org from {guid} to get Ids of the {currObject} object");
+                            HttpResponseMessage idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
+                                , creds, HttpMethod.Post, JsonConvert.SerializeObject(jsonObj));
+                            if (idjobresp != null && idjobresp.Content != null && idjobresp.StatusCode == HttpStatusCode.OK)
+                            {
+                                JObject jobInfo = JObject.Parse(await idjobresp.Content.ReadAsStringAsync());
+                                Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the Ids from the {currObject} object");
+                                //Loop to wait till the job has completed (or failed)
+                                while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
+                                {
+                                    //Every time the loop will wait twice as longer as the previous time
+                                    initialSleep *= 2;
+                                    Trace.TraceInformation($"Thread {guid} is sleep for {initialSleep} seconds then check results...");
+                                    Thread.Sleep(initialSleep * 1000);
+
+                                    //Requests for job completion or failure
+                                    idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
+                                        , creds, HttpMethod.Get);
+                                    if (idjobresp != null && idjobresp.Content != null && idjobresp.StatusCode == HttpStatusCode.OK)
+                                    {
+                                        jobInfo = JObject.Parse(await idjobresp.Content.ReadAsStringAsync());
+                                    }
+                                    else
+                                    {
+                                        jobInfo["state"] = "UnknowError";
+                                        break;
+                                    }
+                                }
+                                if (jobInfo["state"].ToString().Equals("JobComplete"))
+                                {
+                                    //The job has successfully completed. Need to read the CSV data
+                                    idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
+                                        , creds, HttpMethod.Get, accepts: "txt/csv");
+                                    using (var inputStreamReader = new StreamReader(await idjobresp.Content.ReadAsStreamAsync()))
+                                    {
+                                        string inputLine;
+                                        bool firstLine = false;
+                                        char[] Chars = new char[] { '"' };
+                                        Trace.TraceInformation($"Mixing up and quarting Ids for the {currObject} to make necessary subset");
+                                        while ((inputLine = inputStreamReader.ReadLine()) != null)
+                                        {
+                                            if (firstLine)
+                                            {
+                                                mixedIds.Add(inputLine.Trim(Chars));
+                                            }
+                                            else firstLine = true;
+                                        }
+                                        mixedIds = SubsetHelper<string>.MakeSubset(mixedIds, 
+                                            SubsetPercentage: percentForSubset, MinNumber: minNumberOfRecords).ToList<string>();
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Trace.TraceError($"An exception occured while trying to get Ids from {currObject}.\n" +
+                            ex.Message);
+                        }
+                    }
+                    else
+                    {
+                        Trace.TraceInformation($"No subsetting is necessary for {currObject}");
+                    }
+
+                    //Getting the description of the current object
                     try
                     {
                         Trace.TraceInformation($"Sending request to SF org from {guid} to describe {currObject}");
@@ -510,69 +736,140 @@ namespace SalesForceAttachmentsBackupTools
                     }
                     catch (Exception ex)
                     {
-                        Trace.TraceError("An exception occured while working in subset mode.\n" +
+                        Trace.TraceError("An exception occured while working in the subset mode.\n" +
                             ex.Message);
                     }
 
-                    int initialSleep = 3;
+                    initialSleep = 3;
                     if (resp != null && resp.Content != null && resp.StatusCode == HttpStatusCode.OK)
                     {
                         JArray arrFields = JArray.Parse(JObject.Parse(await resp.Content.ReadAsStringAsync())["fields"].ToString());
                         Trace.TraceInformation($"{guid} got {arrFields.Count} fields described in the {currObject}");
 
-                        var jobJsonObj = new
-                        {
-                            operation = "query",
-                            query = "SELECT Id," +
-                            //A selector condition must be added here
-                            arrFields.Where(t => t["updateable"].ToString().Equals("True"))
-                                .Select(o => o["name"].ToString())
-                                .Aggregate("", (c, n) => $"{c}, {n}")
-                                .TrimStart(',')
-                            + " FROM " + currObject,
-                            contentType = "CSV",
-                            columnDelimiter = "PIPE",
-                            lineEnding = "CRLF"
-                        };
-                        string jobLoad = JsonConvert.SerializeObject(jobJsonObj);
-
-                       HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
-                           , creds, HttpMethod.Post, jobLoad);
-
-                        if(jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
-                        {
-                            JObject jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
-                            Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
-                            while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
+                        //If the the subsetting is required then create a partial request since its length cannot be more than 100000 characters
+                        //And there is no way to select random IDs except by naming them in the query -- no more than 4750 'Ids'
+                        int indexOfId = 0;
+                        int runNumber = 0;
+                        //
+                        do {
+                            bool commaFlag = false;
+                            StringBuilder limitedWhereCondition = new StringBuilder();
+                            if (needsToSubset)
                             {
-                                //Every time the loop will wait twice as longer as the previous time
-                                initialSleep *= 2;
-                                Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
-                                Thread.Sleep(initialSleep * 1000);
-                                //Requests for job completion or failure
-                                jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
-                                    , creds, HttpMethod.Get);
-                                if (jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
+                                //define the length of its variable fields parts
+                                limitedWhereCondition.Append(" WHERE Id IN(");
+                                int initialQueryLength = ("SELECT Id," + arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                    .Select(o => o["name"].ToString())
+                                    .Aggregate("", (c, n) => $"{c},{n}")
+                                    .TrimStart(',')
+                                    + " FROM " + currObject + " WHERE Id IN()").Length;
+                                //append to the WHERE condition as long as there are enough Ids or the length treshold is not overcome
+                                while (initialQueryLength + limitedWhereCondition.Length 
+                                    //21 is the length of the quoted Id plus comma
+                                    //but API gives an error stating it is 73 bytes longer than allowed
+                                    //obviously they count other parts of the JSON as the query hence addiotional 100 bytes
+                                    + 121 
+                                    < bulkQueryLengthLimit && indexOfId < mixedIds.Count)
                                 {
-                                    jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                    limitedWhereCondition.Append((commaFlag ? ",'" : "'") + mixedIds[indexOfId++] + "'");
+                                    commaFlag = true;
                                 }
-                                else
-                                {
-                                    jobInfo["state"] = "UnknowError";
-                                    break;
-                                }
+                                limitedWhereCondition.Append(")");
+                                runNumber++;
+                                Trace.TraceInformation($"Preparing query for run #{runNumber} from {guid}");
+                                initialSleep = 3;
                             }
-                            if (jobInfo["state"].ToString().Equals("JobComplete"))
+
+                            var jobJsonObj = new
                             {
-                                //The job has successfully completed
-                                //Need to read the CSV data
-                                jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
-                                    , creds, HttpMethod.Get, accepts: "txt/csv");
-                                //And to store the data in a CSV file
-                                if (true)
+                                operation = "query",
+                                query = "SELECT Id," +
+                                //Begin with only updateable fields since it is most probable that those not allowed for bulk querying 
+                                //will be amongst them
+                                arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                    .Select(o => o["name"].ToString())
+                                //A selector condition must be added here
+                                    .Aggregate("", (c, n) => $"{c},{n}")
+                                    .TrimStart(',')
+                                + " FROM " + currObject
+                                //If needs to subset then add WHERE IN condition
+                                + limitedWhereCondition.ToString(),
+                                contentType = "CSV",
+                                columnDelimiter = "PIPE",
+                                lineEnding = "CRLF"
+                            };
+
+                            //Continue to compose a SQL query to create a table
+                            foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                    .Select(o => o["name"].ToString()))
+                            {
+                                createSQL.Append($",\"{s.ToUpper()}\" VARCHAR2(4000)");
+                                createCTL.Append($",\n\"{s.ToUpper()}\" char \"SUBSTR(:{s},1,4000)\"");
+                            }
+                            createSQL.Append(")");
+                            createCTL.Append(")");
+
+                            //Run table creation task in an async mode with no await
+                            if (runNumber <= 1)
+                            {
+                                Trace.TraceInformation($"Create a table in the Oracle instance to hold the data of the {currObject} from {guid}");
+                                ORCLTask = Task.Run(() =>
                                 {
-                                    string path;
-                                    bool pathExists = creds.TryGetValue("targetPath", out path);
+                                    using (OracleConnection oc = new OracleConnection())
+                                    {
+                                        oc.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; " +
+                                            $"Password={ORCLcreds["ORCLPassword"].ReadString()}; " +
+                                            $"Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
+                                        oc.Open();
+                                        OracleCommand ocmd = new OracleCommand(createSQL.ToString(), oc);
+                                        ocmd.ExecuteNonQuery();
+                                        //Add a comment to the table where to define the current object
+                                        //and designate worker that created it and the timestamp
+                                        ocmd.CommandText = $"COMMENT ON TABLE T{guid.ToString("N").Substring(0, 4)}_{currObject} IS " +
+                                            $"'{currObject} created by the worker {guid} at {String.Format("{0:O}", DateTime.Now)}'";
+                                        ocmd.ExecuteNonQuery();
+                                        oc.Close();
+                                    }
+                                });
+                            }
+
+                            HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
+                                , creds, HttpMethod.Post, JsonConvert.SerializeObject(jobJsonObj));
+
+                            if(jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
+                            {
+                                JObject jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
+                            
+                                //Loop to wait till the job has completed (or failed)
+                                while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
+                                {
+                                    //Every time the loop will wait twice as longer as the previous time
+                                    initialSleep *= 2;
+                                    Trace.TraceInformation($"Sleep for {initialSleep} seconds then check results...");
+                                    Thread.Sleep(initialSleep * 1000);
+                                
+                                    //Requests for job completion or failure
+                                    jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
+                                        , creds, HttpMethod.Get);
+                                    if (jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
+                                    {
+                                        jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                    }
+                                    else
+                                    {
+                                        jobInfo["state"] = "UnknowError";
+                                        break;
+                                    }
+                                }
+                                if (jobInfo["state"].ToString().Equals("JobComplete"))
+                                {
+                                    //The job has successfully completed
+                                    //Need to read the CSV data
+                                    jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
+                                        , creds, HttpMethod.Get, accepts: "txt/csv");
+                                //And to store the data in a CSV file if provided condition is met
+                                    bool pathExists = creds.TryGetValue("targetPath", out string path);
                                     if (pathExists)
                                     {
                                         path = Path.Combine(path, $"{guid}_{currObject}.csv");
@@ -581,37 +878,102 @@ namespace SalesForceAttachmentsBackupTools
                                     {
                                         path = $"{guid}_{currObject}.csv";
                                     }
-                                    using (StreamWriter streamWriter =
-                                        new StreamWriter(new FileStream(path,
-                                        FileMode.CreateNew, FileAccess.Write), Encoding.UTF8)
-                                        )
+                                    string csv_path = path;
+                                    using (StreamWriter streamWriter = new StreamWriter(new FileStream(path,
+                                        FileMode.Append, FileAccess.Write), Encoding.UTF8))
                                     {
-                                        byte[] b = await jobresp.Content.ReadAsByteArrayAsync();
-                                        streamWriter.Write(Encoding.UTF8.GetString(b));
+                                        //For the first or zeroth run store the whole stream as a file -- no need to skip the header
+                                        if (runNumber <= 1)
+                                        {
+                                            streamWriter.Write(Encoding.UTF8.GetString(await jobresp.Content.ReadAsByteArrayAsync()));
+                                        }
+                                        //For the next runs skip the first line and store the stream line by line
+                                        else
+                                        {
+                                            bool flg = false;
+                                            string inputLine;
+                                            using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
+                                            {
+                                                while ((inputLine = inputStreamReader.ReadLine()) != null)
+                                                {
+                                                    if (flg)
+                                                    {
+                                                        streamWriter.WriteLine(inputLine);
+                                                    }
+                                                    else 
+                                                    { 
+                                                        flg = true; 
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                     Trace.TraceInformation($"{path} has been created");
+
+                                    //It should be done on the FIRST run only!
+                                    if (runNumber <= 1)
+                                    {
+                                        pathExists = creds.TryGetValue("targetPath", out path);
+                                        if (pathExists)
+                                        {
+                                            path = Path.Combine(path, $"{guid}_{currObject}.ctl");
+                                        }
+                                        else
+                                        {
+                                            path = $"{guid}_{currObject}.ctl";
+                                        }
+                                        if (ORCLTask?.Status == TaskStatus.RanToCompletion)
+                                        {
+                                            Trace.TraceInformation($"Table to hold {currObject} has been created by {guid}. Writing CTRL file for SQLLDR"); ;
+                                            using (StreamWriter stream = new StreamWriter(new FileStream(path, FileMode.Create, FileAccess.Write), Encoding.ASCII))
+                                            {
+                                                stream.Write(createCTL.ToString());
+                                            }
+
+                                            processStartInfo = new ProcessStartInfo(Path.Combine(Directory.GetCurrentDirectory(), "sqlldr.exe"))
+                                            {
+                                                Arguments = $"'{ORCLcreds["ORCLUserName"].ReadString()}/\"{ORCLcreds["ORCLPassword"].ReadString()}\"" +
+                                                    $"@{ORCLcreds["ORCLDataSource"].ReadString()}'" +
+                                                    $" control=\"{path}\" data=\"{csv_path}\" log=\"{csv_path}.log\" direct=true ",
+                                                CreateNoWindow = true,
+                                                UseShellExecute = false
+                                            };
+
+                                            //Add CSV and CTRL files to the list that need to be cleared
+                                            cleanList.Add(csv_path);
+                                            cleanList.Add(path);
+                                        }
+                                        else
+                                        {
+                                            Trace.TraceWarning($"Creation of the table in the Oracle instance has failed. {guid} can't insert data in RDB");
+                                        }
+                                    }
                                 }
-                                else
+                                else // Job is NOT complete
                                 {
-                                    ;
+                                    Trace.TraceError($"Error processing Bulk job {jobInfo["id"]} for {currObject} with the state {jobInfo["state"]}");
+                                    continue;
                                 }
                             }
                             else
                             {
-                                Trace.TraceError($"Error processing Bulk job {jobInfo["id"]} for {currObject} with the state {jobInfo["state"]}");
+                                Trace.TraceError($"Error creating Bulk job for {currObject}");
                                 continue;
                             }
-                        }
-                        else
+                        } while (needsToSubset && indexOfId < mixedIds.Count);
+                        try
                         {
-                            Trace.TraceError($"Error creating Bulk job for {currObject}");
-                            continue;
+                            sqlldrProcesses.Add(Process.Start(processStartInfo));
+                        }
+                        catch
+                        {
+                            Trace.TraceError($"Bulk load has failed for {currObject} from {guid}. Please clean the data");
                         }
                     }
                     else
                     {
                         Trace.TraceError($"{currObject} failed to read. Sending to the queue again");
-                        listOfIds.Append(currObject);
+                        listOfIds = listOfIds.Append(currObject).ToList();
                     }
                     continue;
                 }
@@ -676,7 +1038,7 @@ namespace SalesForceAttachmentsBackupTools
                     else
                     {
                         Trace.TraceError($"{(listOfIds.ToList())[currentId]} failed to read. Sending to the queue again");
-                        listOfIds.Append((listOfIds.ToList())[currentId]);
+                        listOfIds.Add((listOfIds.ToList())[currentId]);
                     }
                     continue;
                 }
@@ -883,7 +1245,8 @@ namespace SalesForceAttachmentsBackupTools
 
         }
 
-        private static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password, bool UseWinLogon = false)
+        private static IDictionary<string, ProtectedString> OpenKeePassDB (SecureString Password, string pathKDBX, 
+            string grpName, string entrName, bool UseWinLogon = false)
         {
             PwDatabase PwDB = new PwDatabase();
             IOConnectionInfo mioInfo = new IOConnectionInfo
@@ -980,12 +1343,12 @@ namespace SalesForceAttachmentsBackupTools
                 {
                     foreach (PwGroup grp in groups)
                     {
-                        if (grp.Name.Equals(groupName))
+                        if (grp.Name.Equals(grpName))
                         {
                             PwObjectList<PwEntry> entries = grp.GetEntries(false);
                             foreach (PwEntry ent in entries)
                             {
-                                if (ent.Strings.ReadSafe("Title").Equals(entryName))
+                                if (ent.Strings.ReadSafe("Title").Equals(entrName))
                                 {
                                     dict.Add("Salt", new ProtectedString(true, ent.Strings.ReadSafe("Salt")));
                                     dict.Add("Password", new ProtectedString(true, ent.Strings.ReadSafe("Password")));
@@ -993,6 +1356,7 @@ namespace SalesForceAttachmentsBackupTools
                                     dict.Add("UserName", new ProtectedString(true, ent.Strings.ReadSafe("UserName")));
                                     dict.Add("IV", new ProtectedString(true, ent.Strings.ReadSafe("IV")));
                                     dict.Add("SecurityToken", new ProtectedString(true, ent.Strings.ReadSafe("SecurityToken")));
+                                    dict.Add("DataSource", new ProtectedString(true, ent.Strings.ReadSafe("DataSource")));
                                 }
                             }
                         }
@@ -1269,9 +1633,9 @@ namespace SalesForceAttachmentsBackupTools
 
         [Option('f', "filter", Default = null,
             HelpText = "Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;" +
-            "\ntext values must be enclosed in the single quotes." +
-            "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names",
-            MetaValue = "Id IN ('Id1', 'Id2')")]
+            "text values must be enclosed in the single quotes." +
+            "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names \"Account|Contact\"",
+            MetaValue = "Id IN ('Id1','Id2')")]
         public string ReadModeFilter { get; set; }
 
         [Option('w', "winauth", Default = 0,
@@ -1284,6 +1648,23 @@ namespace SalesForceAttachmentsBackupTools
             + "\nHere should be mentioned updateable objects that definitely do not contain sensitive information"
             + "\nImportant in subset mode. {\"ObjectsToExclude\":[\"Attachment\", \"Document\"]}")]
         public string PathToExcludeObjectsJson { get; set; }
+
+        [Option("subsetpercentage", Default = 100, MetaValue = "50",
+            HelpText ="Sets percentage of the subset. If not set then no subsetting is done and the whole object is processed.")]
+        public int SubsetPercentage { get; set; }
+
+        [Option("subsetnumofrec", Default = int.MaxValue, MetaValue = "10000",
+            HelpText ="Sets the required (not more than) number of records in the subset. If not set and no value is given to the "+
+            "\n\"subsetpercentage\" then no subsetting is done. The system defines the minimal value from both parameters")]
+        public int SubsetNumberOfRecords { get; set; }
+
+        [Option("orclgroupname", MetaValue = "EPAM_ORCL",
+            HelpText = "Gives the name of the group where the ORCL credentials must be looked for")]
+        public string ORCLGroupName { get; set; }
+        
+        [Option("orclentryname", MetaValue = "EPAM_ORCL",
+            HelpText = "Gives the name of the entry where the ORCL credentials must be looked for")]
+        public string ORCLEntryName { get; set; }
     }
 
     enum SFObjectsWithAttachments
@@ -1307,6 +1688,7 @@ namespace SalesForceAttachmentsBackupTools
         CryptographicStuffAbsenseError = -2,
         GettingSalesForceSessionIDError = -3,
         ComparisonFileIsAbsentError = -4,
-        UnknownError = -999
+        UnknownError = -999,
+        CredentialsAbsenseError = -5
     }
 }
