@@ -294,7 +294,10 @@ namespace SalesForceAttachmentsBackupTools
                     }
                     break;
                 case WorkingModes.Subset:
-                    if (pathToJSONfile != null) salesForceSID.Add("pathToJson", pathToJSONfile);
+                    if (pathToJSONfile != null && !pathToJSONfile.Equals(String.Empty)) 
+                    { 
+                        salesForceSID.Add("pathToJson", pathToJSONfile); 
+                    }
                     listOfIds = (await GetListOfObjects(salesForceSID, filter)).ToList<string>();
 
                     //If target folder or file path has been given store absolute folder path to the dictionary
@@ -304,16 +307,54 @@ namespace SalesForceAttachmentsBackupTools
                         {
                             salesForceSID.Add("targetPath", Path.GetDirectoryName(pathToComparisonResults));
                         }
-                        catch { }
+                        catch 
+                        {
+                            Trace.TraceError("Error handling target path. Set to the local script folder");
+                            salesForceSID.Add("targetPath", Directory.GetCurrentDirectory());
+                        }
                     }
                     Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
+                    
+                    //Pass a new list to each thread to get the files that need to be cleared up
+                    ConcurrentList<string> cleanUpList = new ConcurrentList<string>(numberOfThreads * 2);
+                    ConcurrentList<Process> sqlldrTasks = new ConcurrentList<Process>(numberOfThreads * 2);
                     for (int i = 0; i < numberOfThreads; i++)
                     {
                         tasks.Add(Task.Run(
-                            () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.StartsWith("ORCL")).ToDictionary(k=>k.Key, k=>k.Value)
+                            () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.StartsWith("ORCL")).ToDictionary(k=>k.Key, k=>k.Value),
+                            cleanUpList, sqlldrTasks
                             )));
                     }
                     Task.WaitAll(tasks.ToArray());
+                    Trace.TraceInformation("Waiting for all SQLLDR processes to finish...");
+                    foreach (Process p in sqlldrTasks) 
+                    { 
+                        p.WaitForExit();
+                        Trace.TraceInformation($"The process {p.Id} has finished with the exit code {p.ExitCode}");
+                        switch (p.ExitCode)
+                        {
+                            case 0:
+                                Trace.TraceInformation($"SQLLDR has successfully uploaded all the rows in the process {p.Id}");
+                                break;
+                            case 1:
+                                Trace.TraceWarning($"The process {p.Id} has failed due to Command-line or syntax errors");
+                                break;
+                            case 2:
+                                Trace.TraceWarning($"The process {p.Id} has erroneous rows please find the corresponding .BAD file," +
+                                    $" look into it to find the cause and delete afterwards since it may contain the sensitive information");
+                                break;
+                            case 3:
+                                Trace.TraceWarning($"The process {p.Id} has failed due to Operating system errors (such as file open/close and malloc)");
+                                break;
+                            default:
+                                break;
+                        }
+                    }
+                    Trace.TraceInformation("Initialising clean-up procedure; delete all the CSV and CTL files");
+                    foreach (string cleanObj in cleanUpList)
+                    {
+                        Process.Start("CMD.EXE",$"/C del {cleanObj}");
+                    }
                     break;
                 default:
                     break;
@@ -368,10 +409,10 @@ namespace SalesForceAttachmentsBackupTools
             List<string> lst = new List<string>();
             if (flt == null)
             {
+                Trace.TraceInformation("No filter is given adding all the possible objects to the list");
                 foreach (JToken j in arr.Where(t => t["updateable"].ToString().Equals("True"))
                     .Except(excludeArray))
                 {
-                    Trace.TraceInformation("No filter is given adding all the possible objects to the list");
                     lst.Add(j["name"].ToString());
                 }
             }
@@ -552,7 +593,8 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="listOfIds">List of objects to be processed</param>
         /// <param name="creds">credentials</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string, ProtectedString> ORCLcreds)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string
+            , ProtectedString> ORCLcreds, IList<string> cleanList, IList<Process> sqlldrProcesses)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
@@ -580,11 +622,11 @@ namespace SalesForceAttachmentsBackupTools
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
                     string currObject = (listOfIds.ToList())[currentId];
-                    createSQL.Append($"CREATE TABLE T{currentId}_{guid.ToString("N").ToUpper()} (Id VARCHAR2(18) NOT NULL");
+                    createSQL.Append($"CREATE TABLE T{guid.ToString("N").Substring(0,4)}_{currObject} (Id VARCHAR2(18) NOT NULL");
                     createCTL.Append("OPTIONS (SKIP=1, ROWS=5000)" +
                                         "\nLOAD DATA" +
                                         "\nTRUNCATE" +
-                                        $"\nINTO TABLE T{currentId}_{guid.ToString("N").ToUpper()}" +
+                                        $"\nINTO TABLE T{guid.ToString("N").Substring(0, 4)}_{currObject}" +
                                         $"\nFIELDS TERMINATED BY '|' OPTIONALLY ENCLOSED BY '\"'" +
                                         "\n(id char"
                                     );
@@ -761,8 +803,8 @@ namespace SalesForceAttachmentsBackupTools
                             foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True"))
                                     .Select(o => o["name"].ToString()))
                             {
-                                createSQL.Append($",{s} VARCHAR2(4000)");
-                                createCTL.Append($",\n{s} char \"SUBSTR(:{s},1,4000)\"");
+                                createSQL.Append($",\"{s.ToUpper()}\" VARCHAR2(4000)");
+                                createCTL.Append($",\n\"{s.ToUpper()}\" char \"SUBSTR(:{s},1,4000)\"");
                             }
                             createSQL.Append(")");
                             createCTL.Append(")");
@@ -775,12 +817,16 @@ namespace SalesForceAttachmentsBackupTools
                                 {
                                     using (OracleConnection oc = new OracleConnection())
                                     {
-                                        oc.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; Password={ORCLcreds["ORCLPassword"].ReadString()}; Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
+                                        oc.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; " +
+                                            $"Password={ORCLcreds["ORCLPassword"].ReadString()}; " +
+                                            $"Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
                                         oc.Open();
                                         OracleCommand ocmd = new OracleCommand(createSQL.ToString(), oc);
                                         ocmd.ExecuteNonQuery();
-                                    //Add a comment to the table where to define the current object
-                                    ocmd.CommandText = $"COMMENT ON TABLE T{currentId}_{guid.ToString("N").ToUpper()} IS '{currObject}'";
+                                        //Add a comment to the table where to define the current object
+                                        //and designate worker that created it and the timestamp
+                                        ocmd.CommandText = $"COMMENT ON TABLE T{guid.ToString("N").Substring(0, 4)}_{currObject} IS " +
+                                            $"'{currObject} created by the worker {guid} at {String.Format("{0:O}", DateTime.Now)}'";
                                         ocmd.ExecuteNonQuery();
                                         oc.Close();
                                     }
@@ -841,6 +887,7 @@ namespace SalesForceAttachmentsBackupTools
                                         {
                                             streamWriter.Write(Encoding.UTF8.GetString(await jobresp.Content.ReadAsByteArrayAsync()));
                                         }
+                                        //For the next runs skip the first line and store the stream line by line
                                         else
                                         {
                                             bool flg = false;
@@ -863,7 +910,7 @@ namespace SalesForceAttachmentsBackupTools
                                     }
                                     Trace.TraceInformation($"{path} has been created");
 
-                                    //It should be done on the LAST run!
+                                    //It should be done on the FIRST run only!
                                     if (runNumber <= 1)
                                     {
                                         pathExists = creds.TryGetValue("targetPath", out path);
@@ -883,12 +930,18 @@ namespace SalesForceAttachmentsBackupTools
                                                 stream.Write(createCTL.ToString());
                                             }
 
-                                            processStartInfo = new ProcessStartInfo(Path.Combine(Directory.GetCurrentDirectory(), "sqlldr.exe"));
-                                            processStartInfo.Arguments = $"'{ORCLcreds["ORCLUserName"].ReadString()}/\"{ORCLcreds["ORCLPassword"].ReadString()}\"" +
-                                                $"@{ORCLcreds["ORCLDataSource"].ReadString()}'" +
-                                                $" control=\"{path}\" data=\"{csv_path}\" log=\"{csv_path}.log\" direct=true";
-                                            processStartInfo.CreateNoWindow = true;
-                                            processStartInfo.UseShellExecute = false;
+                                            processStartInfo = new ProcessStartInfo(Path.Combine(Directory.GetCurrentDirectory(), "sqlldr.exe"))
+                                            {
+                                                Arguments = $"'{ORCLcreds["ORCLUserName"].ReadString()}/\"{ORCLcreds["ORCLPassword"].ReadString()}\"" +
+                                                    $"@{ORCLcreds["ORCLDataSource"].ReadString()}'" +
+                                                    $" control=\"{path}\" data=\"{csv_path}\" log=\"{csv_path}.log\" direct=true ",
+                                                CreateNoWindow = true,
+                                                UseShellExecute = false
+                                            };
+
+                                            //Add CSV and CTRL files to the list that need to be cleared
+                                            cleanList.Add(csv_path);
+                                            cleanList.Add(path);
                                         }
                                         else
                                         {
@@ -908,7 +961,14 @@ namespace SalesForceAttachmentsBackupTools
                                 continue;
                             }
                         } while (needsToSubset && indexOfId < mixedIds.Count);
-                        Process processChild = Process.Start(processStartInfo);
+                        try
+                        {
+                            sqlldrProcesses.Add(Process.Start(processStartInfo));
+                        }
+                        catch
+                        {
+                            Trace.TraceError($"Bulk load has failed for {currObject} from {guid}. Please clean the data");
+                        }
                     }
                     else
                     {
