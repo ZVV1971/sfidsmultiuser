@@ -623,8 +623,9 @@ namespace SalesForceAttachmentsBackupTools
                 {
                     string currObject = (listOfIds.ToList())[currentId];
                     createSQL.Append($"CREATE TABLE T{guid.ToString("N").Substring(0,4)}_{currObject} (Id VARCHAR2(18) NOT NULL");
-                    createCTL.Append("OPTIONS (SKIP=1, ROWS=5000)" +
+                    createCTL.Append("OPTIONS (SKIP=1, ROWS=5000, DIRECT=TRUE)" +
                                         "\nLOAD DATA" +
+                                        "\nCHARACTERSET UTF8 LENGTH SEMANTICS CHAR" +
                                         "\nTRUNCATE" +
                                         $"\nINTO TABLE T{guid.ToString("N").Substring(0, 4)}_{currObject}" +
                                         $"\nFIELDS TERMINATED BY '|' OPTIONALLY ENCLOSED BY '\"'" +
@@ -934,10 +935,11 @@ namespace SalesForceAttachmentsBackupTools
                                             {
                                                 Arguments = $"'{ORCLcreds["ORCLUserName"].ReadString()}/\"{ORCLcreds["ORCLPassword"].ReadString()}\"" +
                                                     $"@{ORCLcreds["ORCLDataSource"].ReadString()}'" +
-                                                    $" control=\"{path}\" data=\"{csv_path}\" log=\"{csv_path}.log\" direct=true ",
+                                                    $" control=\"{path}\" data=\"{csv_path}\" log=\"{csv_path}.log\"",
                                                 CreateNoWindow = true,
-                                                UseShellExecute = false
+                                                UseShellExecute = false,
                                             };
+                                            //processStartInfo.EnvironmentVariables.Add("NLS_LANG", "AMERICAN_AMERICA.WE8ISO8859P1");
 
                                             //Add CSV and CTRL files to the list that need to be cleared
                                             cleanList.Add(csv_path);
