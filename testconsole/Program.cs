@@ -299,27 +299,12 @@ namespace SalesForceAttachmentsBackupTools
                     }
                     break;
                 case WorkingModes.Subset:
-                    if (pathToJSONfile != null && !pathToJSONfile.Equals(String.Empty)) 
-                    { 
-                        salesForceSID.Add("pathToJson", pathToJSONfile); 
-                    }
+                    if (pathToJSONfile != null && !pathToJSONfile.Equals(String.Empty)) salesForceSID.Add("pathToJson", pathToJSONfile);
+                    //Get List of SF Objects to be processed and the list of the non-sensitive fields in a form of pairs
                     Tuple<IEnumerable<string>, JToken> jsonParseResult = await GetListOfObjects(salesForceSID, filter);
                     listOfIds = jsonParseResult.Item1.ToList<string>();
                     listOfNonSensitivePairs = jsonParseResult.Item2;
 
-                    //If target folder or file path has been given store absolute folder path to the dictionary
-                    if (pathToComparisonResults != null && !pathToComparisonResults.Equals(String.Empty))
-                    {
-                        try
-                        {
-                            salesForceSID.Add("targetPath", Path.GetDirectoryName(pathToComparisonResults));
-                        }
-                        catch 
-                        {
-                            Trace.TraceError("Error handling target path. Set to the local script folder");
-                            salesForceSID.Add("targetPath", Directory.GetCurrentDirectory());
-                        }
-                    }
                     Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
                     
                     //Pass a new list to each thread to get the files that need to be cleared up
@@ -713,11 +698,7 @@ namespace SalesForceAttachmentsBackupTools
                         do {
                             bool commaFlag = false;
                             StringBuilder limitedWhereCondition = new StringBuilder();
-                            if (needsToSubset)
-                            {
-                                //define the length of its variable fields parts
-                                limitedWhereCondition.Append(" WHERE Id IN(");
-                                int initialQueryLength = ("SELECT Id," + arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                            StringBuilder fieldsList = new StringBuilder("SELECT Id," + arrFields.Where(t => t["updateable"].ToString().Equals("True"))
                                     .Select(o => o["name"].ToString())
                                     //Exclude the non-sensitive fileds pecific to the current Object
                                     .Except(listOfNonSensitivePairs
@@ -730,7 +711,12 @@ namespace SalesForceAttachmentsBackupTools
                                         )
                                     .Aggregate("", (c, n) => $"{c},{n}")
                                     .TrimStart(',')
-                                    + " FROM " + currObject + " WHERE Id IN()").Length;
+                                    + " FROM " + currObject);
+                            if (needsToSubset)
+                            {
+                                //define the length of its variable fields parts to take care of the length of the query
+                                limitedWhereCondition.Append(" WHERE Id IN(");
+                                int initialQueryLength = fieldsList.Length + limitedWhereCondition.Length;
                                 //append to the WHERE condition as long as there are enough Ids or the length treshold is not overcome
                                 while (initialQueryLength + limitedWhereCondition.Length 
                                     //21 is the length of the quoted Id plus comma
@@ -751,26 +737,9 @@ namespace SalesForceAttachmentsBackupTools
                             var jobJsonObj = new
                             {
                                 operation = "query",
-                                query = "SELECT Id," +
-                                //Begin with only updateable fields since it is most probable that those not allowed for bulk querying 
-                                //will be amongst them
-                                arrFields.Where(t => t["updateable"].ToString().Equals("True"))
-                                    .Select(o => o["name"].ToString())
-                                        //Exclude the non-sensitive fields specific to the current Object        
-                                        .Except(listOfNonSensitivePairs
-                                        .Select(t => t[currObject]?.ToString())
-                                        .Where(t => t != null)
-                                        //Exclude the non-sensitive fields common to all Objects
-                                        .Concat(listOfNonSensitivePairs
-                                        .Select(t => t["AnyObject"]?.ToString())
-                                        .Where(t => t != null))
-                                        )
-                                //A selector condition must be added here
-                                    .Aggregate("", (c, n) => $"{c},{n}")
-                                    .TrimStart(',')
-                                + " FROM " + currObject
-                                //If needs to subset then add WHERE IN condition
-                                + limitedWhereCondition.ToString(),
+                                query = fieldsList.ToString()
+                                    //If needs to subset then add WHERE IN condition
+                                    + limitedWhereCondition.ToString(),
                                 contentType = "CSV",
                                 columnDelimiter = "PIPE",
                                 lineEnding = "CRLF"
