@@ -27,6 +27,10 @@ using System.Threading.Tasks;
 using System.Xml;
 using System.Web;
 using Oracle.ManagedDataAccess.Client;
+using CsvHelper;
+using CsvHelper.Configuration;
+using System.Globalization;
+using System.Data;
 
 namespace SalesForceAttachmentsBackupTools
 {
@@ -51,8 +55,9 @@ namespace SalesForceAttachmentsBackupTools
         private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
-        private static List<string> listOfIds = null;
-        private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;
+        private static List<string> listOfIds = null;               //Either list of Ids for Read, Write and Compare mode or list of SF Objects
+        private static JToken listOfNonSensitivePairs = null;                                  //list of object-field pairs that schould not come into copy
+        private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;                 //A queue of Id and Base64-encoded binary attachment to process by the workers
         private static TimeSpan waittime = TimeSpan.FromSeconds(30);                            //Time to wait before console closure
         private static ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener();
         private static bool useWindowsLogon = false;                                            //Use windows authentication to open KBDX
@@ -298,7 +303,9 @@ namespace SalesForceAttachmentsBackupTools
                     { 
                         salesForceSID.Add("pathToJson", pathToJSONfile); 
                     }
-                    listOfIds = (await GetListOfObjects(salesForceSID, filter)).ToList<string>();
+                    Tuple<IEnumerable<string>, JToken> jsonParseResult = await GetListOfObjects(salesForceSID, filter);
+                    listOfIds = jsonParseResult.Item1.ToList<string>();
+                    listOfNonSensitivePairs = jsonParseResult.Item2;
 
                     //If target folder or file path has been given store absolute folder path to the dictionary
                     if (pathToComparisonResults != null && !pathToComparisonResults.Equals(String.Empty))
@@ -317,44 +324,13 @@ namespace SalesForceAttachmentsBackupTools
                     
                     //Pass a new list to each thread to get the files that need to be cleared up
                     ConcurrentList<string> cleanUpList = new ConcurrentList<string>(numberOfThreads * 2);
-                    ConcurrentList<Process> sqlldrTasks = new ConcurrentList<Process>(numberOfThreads * 2);
                     for (int i = 0; i < numberOfThreads; i++)
                     {
                         tasks.Add(Task.Run(
                             () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.StartsWith("ORCL")).ToDictionary(k=>k.Key, k=>k.Value),
-                            cleanUpList, sqlldrTasks
-                            )));
+                            listOfNonSensitivePairs)));
                     }
                     Task.WaitAll(tasks.ToArray());
-                    Trace.TraceInformation("Waiting for all SQLLDR processes to finish...");
-                    foreach (Process p in sqlldrTasks) 
-                    { 
-                        p.WaitForExit();
-                        Trace.TraceInformation($"The process {p.Id} has finished with the exit code {p.ExitCode}");
-                        switch (p.ExitCode)
-                        {
-                            case 0:
-                                Trace.TraceInformation($"SQLLDR has successfully uploaded all the rows in the process {p.Id}");
-                                break;
-                            case 1:
-                                Trace.TraceWarning($"The process {p.Id} has failed due to Command-line or syntax errors");
-                                break;
-                            case 2:
-                                Trace.TraceWarning($"The process {p.Id} has erroneous rows please find the corresponding .BAD file," +
-                                    $" look into it to find the cause and delete afterwards since it may contain the sensitive information");
-                                break;
-                            case 3:
-                                Trace.TraceWarning($"The process {p.Id} has failed due to Operating system errors (such as file open/close and malloc)");
-                                break;
-                            default:
-                                break;
-                        }
-                    }
-                    Trace.TraceInformation("Initialising clean-up procedure; delete all the CSV and CTL files");
-                    foreach (string cleanObj in cleanUpList)
-                    {
-                        Process.Start("CMD.EXE",$"/C del {cleanObj}");
-                    }
                     break;
                 default:
                     break;
@@ -376,7 +352,7 @@ namespace SalesForceAttachmentsBackupTools
         /// if found among those present in the SF org</param>
         /// <returns></returns>
         #region Methods
-        private static async Task<IEnumerable<string>> GetListOfObjects(IDictionary<string,string> dic, string flt)
+        private static async Task<Tuple<IEnumerable<string>, JToken>> GetListOfObjects(IDictionary<string, string> dic, string flt)
         {
             Trace.TraceInformation("Getting the list of the objects, please, wait it may take a little while...");
             HttpResponseMessage listOfObjects = await ReadFromSalesForce(new Uri(dic["serverUrl"] + "/sobjects/"), 
@@ -388,49 +364,41 @@ namespace SalesForceAttachmentsBackupTools
             //Compose an array to be used for exclusion of __Share objects since they cannot contain any sensitive information
             IEnumerable<JToken> excludeArray = arr.Where(t => t["name"].ToString().EndsWith("__Share"));
             excludeArray = excludeArray.Concat(arr.Where(t => t["name"].ToString().EndsWith("__Tag")));
+            JObject data = null;
             // Others exclusions must be added in the same manner here
             string path;
             if (dic.TryGetValue("pathToJson", out path))
             {
                 try
                 {
-                    //An array of JTokens to collect SF objects described in the manner as in the org's json to add to the exclude array
-                    List<JToken> tk = new List<JToken>();
-                    JObject data = JObject.Parse(File.ReadAllText(path));
-                    foreach(JToken j in JArray.Parse(data["ObjectsToExclude"].ToString()))
-                    {
-                        tk.Add(arr.Where(t => t["name"].ToString().Equals(j.ToString())).First());
-                    }
-                    excludeArray = excludeArray.Concat(tk);
+                    data = JObject.Parse(File.ReadAllText(path));
+                    excludeArray = excludeArray.Concat(JArray.Parse(data["ObjectsToExclude"].ToString()).Intersect(arr).ToList());
                 }
-                catch { }
+                catch (Exception ex) 
+                { }
             }
  
             List<string> lst = new List<string>();
             if (flt == null)
             {
                 Trace.TraceInformation("No filter is given adding all the possible objects to the list");
-                foreach (JToken j in arr.Where(t => t["updateable"].ToString().Equals("True"))
-                    .Except(excludeArray))
-                {
-                    lst.Add(j["name"].ToString());
-                }
+
+                lst = arr.Where(t => t["updateable"].ToString().Equals("True"))
+                            .Except(excludeArray)
+                            .Select(j => j["name"].ToString()).ToList<string>();
             }
             else
             {
-                foreach (JToken j in arr.Where(t => t["updateable"].ToString().Equals("True"))
-                    .Except(excludeArray)
-                    .Join(filter.Split('|'),
-                    p => p["name"].ToString(),
-                    t => t,
-                    (p, t) => t))
-                {
-                    Trace.TraceInformation($"Filter is active; adding {j} to the list of the objects to be processed");
-                    lst.Add(j.ToString());
-                }
+                lst = arr.Where(t => t["updateable"].ToString().Equals("True"))
+                        .Except(excludeArray)
+                        .Join(filter.Split('|'),
+                            p => p["name"].ToString(),
+                            t => t,
+                            (p, t) => t)
+                        .Select(t => t).ToList<string>();
             }
             Trace.TraceInformation($"Total number of objects to be processes is {lst.Count}");
-            return lst;
+            return new Tuple<IEnumerable<string>, JToken>(lst, data["FieldsToExclude"]);
         }
 
         private static SymmetricAlgorithm PrepareCryptographicStuff(IDictionary<string, ProtectedString> creds)
@@ -594,7 +562,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="creds">credentials</param>
         /// <returns></returns>
         private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string
-            , ProtectedString> ORCLcreds, IList<string> cleanList, IList<Process> sqlldrProcesses)
+            , ProtectedString> ORCLcreds, JToken excludeFields)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
@@ -604,7 +572,6 @@ namespace SalesForceAttachmentsBackupTools
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage resp = null;
             StringBuilder createSQL = new StringBuilder();
-            StringBuilder createCTL = new StringBuilder();
 
             do
             {
@@ -615,22 +582,13 @@ namespace SalesForceAttachmentsBackupTools
                 mixedIds.Clear();
                 needsToSubset = false;
                 createSQL.Clear();
-                createCTL.Clear();
                 Task ORCLTask = null;
-                ProcessStartInfo processStartInfo = null;
 
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
                     string currObject = (listOfIds.ToList())[currentId];
                     createSQL.Append($"CREATE TABLE T{guid.ToString("N").Substring(0,4)}_{currObject} (Id VARCHAR2(18) NOT NULL");
-                    createCTL.Append("OPTIONS (SKIP=1, ROWS=5000)" +
-                                        "\nLOAD DATA" +
-                                        "\nTRUNCATE" +
-                                        $"\nINTO TABLE T{guid.ToString("N").Substring(0, 4)}_{currObject}" +
-                                        $"\nFIELDS TERMINATED BY '|' OPTIONALLY ENCLOSED BY '\"'" +
-                                        "\n(id char"
-                                    );
-
+                    
                     //Getting number of records in the current object
                     try
                     {
@@ -670,6 +628,7 @@ namespace SalesForceAttachmentsBackupTools
                             {
                                 JObject jobInfo = JObject.Parse(await idjobresp.Content.ReadAsStringAsync());
                                 Trace.TraceInformation($"{guid} has queued a job {jobInfo["id"]} to get the Ids from the {currObject} object");
+                                
                                 //Loop to wait till the job has completed (or failed)
                                 while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
                                 {
@@ -760,6 +719,15 @@ namespace SalesForceAttachmentsBackupTools
                                 limitedWhereCondition.Append(" WHERE Id IN(");
                                 int initialQueryLength = ("SELECT Id," + arrFields.Where(t => t["updateable"].ToString().Equals("True"))
                                     .Select(o => o["name"].ToString())
+                                    //Exclude the non-sensitive fileds pecific to the current Object
+                                    .Except(listOfNonSensitivePairs
+                                        .Select(t => t[currObject]?.ToString())
+                                        .Where(t => t != null)
+                                        //Exclude the non-sensitive fields common to all Objects
+                                        .Concat(listOfNonSensitivePairs
+                                        .Select(t => t["AnyObject"]?.ToString())
+                                        .Where(t => t != null))
+                                        )
                                     .Aggregate("", (c, n) => $"{c},{n}")
                                     .TrimStart(',')
                                     + " FROM " + currObject + " WHERE Id IN()").Length;
@@ -788,6 +756,15 @@ namespace SalesForceAttachmentsBackupTools
                                 //will be amongst them
                                 arrFields.Where(t => t["updateable"].ToString().Equals("True"))
                                     .Select(o => o["name"].ToString())
+                                        //Exclude the non-sensitive fields specific to the current Object        
+                                        .Except(listOfNonSensitivePairs
+                                        .Select(t => t[currObject]?.ToString())
+                                        .Where(t => t != null)
+                                        //Exclude the non-sensitive fields common to all Objects
+                                        .Concat(listOfNonSensitivePairs
+                                        .Select(t => t["AnyObject"]?.ToString())
+                                        .Where(t => t != null))
+                                        )
                                 //A selector condition must be added here
                                     .Aggregate("", (c, n) => $"{c},{n}")
                                     .TrimStart(',')
@@ -801,15 +778,23 @@ namespace SalesForceAttachmentsBackupTools
 
                             //Continue to compose a SQL query to create a table
                             foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True"))
-                                    .Select(o => o["name"].ToString()))
+                                    .Select(o => o["name"].ToString())
+                                    .Except(listOfNonSensitivePairs
+                                            //Exclude the non-sensitive fields for the specific Object
+                                            .Select(t => t[currObject]?.ToString())
+                                            .Where(t => t != null)
+                                            //Exclude the non-sensitive fields common to all and Objects
+                                            .Concat(listOfNonSensitivePairs
+                                            .Select(t => t["AnyObject"]?.ToString())
+                                            .Where(t => t != null))
+                                        )
+                                    )
                             {
                                 createSQL.Append($",\"{s.ToUpper()}\" VARCHAR2(4000)");
-                                createCTL.Append($",\n\"{s.ToUpper()}\" char \"SUBSTR(:{s},1,4000)\"");
                             }
                             createSQL.Append(")");
-                            createCTL.Append(")");
 
-                            //Run table creation task in an async mode with no await
+                            //Run table creation task in an async mode with no await only in the first batch
                             if (runNumber <= 1)
                             {
                                 Trace.TraceInformation($"Create a table in the Oracle instance to hold the data of the {currObject} from {guid}");
@@ -824,7 +809,7 @@ namespace SalesForceAttachmentsBackupTools
                                         OracleCommand ocmd = new OracleCommand(createSQL.ToString(), oc);
                                         ocmd.ExecuteNonQuery();
                                         //Add a comment to the table where to define the current object
-                                        //and designate worker that created it and the timestamp
+                                        //and designated worker that created it and the timestamp
                                         ocmd.CommandText = $"COMMENT ON TABLE T{guid.ToString("N").Substring(0, 4)}_{currObject} IS " +
                                             $"'{currObject} created by the worker {guid} at {String.Format("{0:O}", DateTime.Now)}'";
                                         ocmd.ExecuteNonQuery();
@@ -868,85 +853,46 @@ namespace SalesForceAttachmentsBackupTools
                                     //Need to read the CSV data
                                     jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
                                         , creds, HttpMethod.Get, accepts: "txt/csv");
-                                //And to store the data in a CSV file if provided condition is met
-                                    bool pathExists = creds.TryGetValue("targetPath", out string path);
-                                    if (pathExists)
+
+                                    Trace.TraceInformation($"Waiting for {ORCLTask?.Id} to complete from {guid}");
+                                    ORCLTask?.Wait();
+                                    if (ORCLTask?.Status == TaskStatus.RanToCompletion)
                                     {
-                                        path = Path.Combine(path, $"{guid}_{currObject}.csv");
+                                        Trace.TraceInformation($"Push the batch #{runNumber} of the {currObject} from {guid} to the Oracle instance");
+                                        ORCLTask = Task.Run(async () =>
+                                        {
+                                            using (OracleConnection con = new OracleConnection())
+                                            {
+                                                con.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; " +
+                                                    $"Password={ORCLcreds["ORCLPassword"].ReadString()}; " +
+                                                    $"Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
+                                                con.Open();
+                                                using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
+                                                using (var csv = new CsvReader(inputStreamReader, 
+                                                    new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
+                                                using (var dr = new CsvDataReader(csv))
+                                                {
+                                                    DataTable dt = new DataTable();
+                                                    dt.Load(dr);
+                                                    OracleBulkCopy bulkCopy = new OracleBulkCopy(con) 
+                                                    {
+                                                        DestinationTableName = $"T{guid.ToString("N").Substring(0, 4)}_{currObject}", 
+                                                        BatchSize = 10000, }
+                                                    ;
+                                                    for (int i = 0; i < dt.Columns.Count; i++)
+                                                    {
+                                                        bulkCopy.ColumnMappings.Add(i, i);
+                                                    }
+                                                    bulkCopy.WriteToServer(dt);
+                                                    bulkCopy.Close();
+                                                }
+                                                con.Close();
+                                            }
+                                        });
                                     }
                                     else
                                     {
-                                        path = $"{guid}_{currObject}.csv";
-                                    }
-                                    string csv_path = path;
-                                    using (StreamWriter streamWriter = new StreamWriter(new FileStream(path,
-                                        FileMode.Append, FileAccess.Write), Encoding.UTF8))
-                                    {
-                                        //For the first or zeroth run store the whole stream as a file -- no need to skip the header
-                                        if (runNumber <= 1)
-                                        {
-                                            streamWriter.Write(Encoding.UTF8.GetString(await jobresp.Content.ReadAsByteArrayAsync()));
-                                        }
-                                        //For the next runs skip the first line and store the stream line by line
-                                        else
-                                        {
-                                            bool flg = false;
-                                            string inputLine;
-                                            using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
-                                            {
-                                                while ((inputLine = inputStreamReader.ReadLine()) != null)
-                                                {
-                                                    if (flg)
-                                                    {
-                                                        streamWriter.WriteLine(inputLine);
-                                                    }
-                                                    else 
-                                                    { 
-                                                        flg = true; 
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Trace.TraceInformation($"{path} has been created");
-
-                                    //It should be done on the FIRST run only!
-                                    if (runNumber <= 1)
-                                    {
-                                        pathExists = creds.TryGetValue("targetPath", out path);
-                                        if (pathExists)
-                                        {
-                                            path = Path.Combine(path, $"{guid}_{currObject}.ctl");
-                                        }
-                                        else
-                                        {
-                                            path = $"{guid}_{currObject}.ctl";
-                                        }
-                                        if (ORCLTask?.Status == TaskStatus.RanToCompletion)
-                                        {
-                                            Trace.TraceInformation($"Table to hold {currObject} has been created by {guid}. Writing CTRL file for SQLLDR"); ;
-                                            using (StreamWriter stream = new StreamWriter(new FileStream(path, FileMode.Create, FileAccess.Write), Encoding.ASCII))
-                                            {
-                                                stream.Write(createCTL.ToString());
-                                            }
-
-                                            processStartInfo = new ProcessStartInfo(Path.Combine(Directory.GetCurrentDirectory(), "sqlldr.exe"))
-                                            {
-                                                Arguments = $"'{ORCLcreds["ORCLUserName"].ReadString()}/\"{ORCLcreds["ORCLPassword"].ReadString()}\"" +
-                                                    $"@{ORCLcreds["ORCLDataSource"].ReadString()}'" +
-                                                    $" control=\"{path}\" data=\"{csv_path}\" log=\"{csv_path}.log\" direct=true ",
-                                                CreateNoWindow = true,
-                                                UseShellExecute = false
-                                            };
-
-                                            //Add CSV and CTRL files to the list that need to be cleared
-                                            cleanList.Add(csv_path);
-                                            cleanList.Add(path);
-                                        }
-                                        else
-                                        {
-                                            Trace.TraceWarning($"Creation of the table in the Oracle instance has failed. {guid} can't insert data in RDB");
-                                        }
+                                        Trace.TraceError($"{ORCLTask?.Id} has failed. Data are dropped");
                                     }
                                 }
                                 else // Job is NOT complete
@@ -961,14 +907,6 @@ namespace SalesForceAttachmentsBackupTools
                                 continue;
                             }
                         } while (needsToSubset && indexOfId < mixedIds.Count);
-                        try
-                        {
-                            sqlldrProcesses.Add(Process.Start(processStartInfo));
-                        }
-                        catch
-                        {
-                            Trace.TraceError($"Bulk load has failed for {currObject} from {guid}. Please clean the data");
-                        }
                     }
                     else
                     {
@@ -1578,7 +1516,7 @@ namespace SalesForceAttachmentsBackupTools
             "\nWrite - to read the data from encrypted file and store them back into the SF org;" +
             "\nCompare - to compare the data from the encrypted file and SF org;" +
             "\nPrepare - to prepare Crypto stuff in the given KDBX file (adds correctly filled AESPassword, Salt and IV records)" +
-            "\nSubset - to store a subset in the RDB (filter can be applied)",
+            "\nSubset - to store a subset in the RDB (filter can be applied). Requires SQLLDR.EXE presence in the script folder!",
             MetaValue = "Read")]
 
         public WorkingModes WorkMode { get; set; }
@@ -1616,13 +1554,11 @@ namespace SalesForceAttachmentsBackupTools
         public int NumberOfWorkingThreads { get; set; }
 
         [Option('c', "comppath",
-            HelpText = "Sets path to the file with comparison results" +
-            "\nIn case Subset workmode is selected and files are going to be stored in a CSV format sets a target folder",
-            MetaValue = "D:\\Doc_comp_res.dat")]
+            HelpText = "Sets path to the file with comparison results", MetaValue = "D:\\Doc_comp_res.dat")]
         public string ComparisonResultsFilePath { get; set; }
 
         [Option('l', "logfile",
-            HelpText = "Sets the path to the logging file in additon to logging to the Console",
+            HelpText = "Sets the path to the logging file in additon to logging to the Console (if it's enabled by the next switch)",
             MetaValue = "D:\\Att_bkp.log")]
         public string LogFilePath { get; set; }
 
@@ -1634,7 +1570,7 @@ namespace SalesForceAttachmentsBackupTools
         [Option('f', "filter", Default = null,
             HelpText = "Takes a filter when running in the \"Read\" mode; \nWHERE keyword must be omitted;" +
             "text values must be enclosed in the single quotes." +
-            "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names \"Account|Contact\"",
+            "\nTo select necesssary objects when creating a Subset give pipe-separated list of object names, e.g. \"Account|Contact\"",
             MetaValue = "Id IN ('Id1','Id2')")]
         public string ReadModeFilter { get; set; }
 
@@ -1646,7 +1582,7 @@ namespace SalesForceAttachmentsBackupTools
         [Option("excludeobjects", Default = null, MetaValue = "D:\\ObjectsToExclude.json",
             HelpText = "Sets path to the JSON file that must contain the array with object names to be excluded from the listing."
             + "\nHere should be mentioned updateable objects that definitely do not contain sensitive information"
-            + "\nImportant in subset mode. {\"ObjectsToExclude\":[\"Attachment\", \"Document\"]}")]
+            + "\nImportant in subset mode. {\"ObjectsToExclude\":[\"Attachment\", \"Document\"],\"FieldsToExclude:[\"Jigsaw\",\"Sic\"]\"}")]
         public string PathToExcludeObjectsJson { get; set; }
 
         [Option("subsetpercentage", Default = 100, MetaValue = "50",
