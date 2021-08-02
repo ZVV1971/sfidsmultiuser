@@ -51,15 +51,15 @@ namespace SalesForceAttachmentsBackupTools
         private static int numberOfThreads;
         private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
         private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
-        private static int bulkQueryLengthLimit = 100000;           //The limit imposed by the SalesForce on the bulk query length
-        private static HttpClient client = new HttpClient();
+        private static readonly int bulkQueryLengthLimit = 100000;  //The limit imposed by the SalesForce on the bulk query length
+        private static readonly HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
         private static List<string> listOfIds = null;               //Either list of Ids for Read, Write and Compare mode or list of SF Objects
         private static JToken listOfNonSensitivePairs = null;                                  //list of object-field pairs that schould not come into copy
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;                 //A queue of Id and Base64-encoded binary attachment to process by the workers
         private static TimeSpan waittime = TimeSpan.FromSeconds(30);                            //Time to wait before console closure
-        private static ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener();
+        private static readonly ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener() { Name = "AttBkp"};
         private static bool useWindowsLogon = false;                                            //Use windows authentication to open KBDX
         private static SymmetricAlgorithm cipher;
         private static Dictionary<string, ProtectedString> credentialsDict;
@@ -68,7 +68,7 @@ namespace SalesForceAttachmentsBackupTools
         static async Task Main(string[] args)
         {
             //Parse the arguments
-            int result = Parser.Default.ParseArguments<Options>(args)
+            _ = Parser.Default.ParseArguments<Options>(args)
                 .MapResult(
                 (Options opt) =>
                 {
@@ -546,8 +546,8 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="listOfIds">List of objects to be processed</param>
         /// <param name="creds">credentials</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string
-            , ProtectedString> ORCLcreds, JToken excludeFields)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, 
+            IDictionary<string, ProtectedString> ORCLcreds, JToken excludeFields)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
@@ -901,7 +901,8 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="cryptoTrans">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="writer">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, 
+            ICryptoTransform cryptoTrans, TextWriter writer)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId;
@@ -964,7 +965,8 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="obj">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="cryptoTrans">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>
-        private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
+        private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, 
+            ICryptoTransform cryptoTrans) 
         {
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
@@ -972,7 +974,7 @@ namespace SalesForceAttachmentsBackupTools
             while (true) 
             {
                 KeyValuePair<string, string> att;
-                if (minSizeQueue.TryDequeue(out att))
+                if (queue.TryDequeue(out att))
                 {
                     byte[] valueBytes = null;
                     try
@@ -1038,7 +1040,7 @@ namespace SalesForceAttachmentsBackupTools
                 }
                 else 
                 {
-                    minSizeQueue.Close();
+                    queue.Close();
                     break; 
                 }
             }
@@ -1058,7 +1060,8 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="cryptoTrans">Cryptographic stuff necessary to decrypt the backup content</param>
         /// <param name="writer">A shared text stream to store the comparison results into</param>
         /// <returns></returns>
-        private static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
+        private static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, 
+            ICryptoTransform cryptoTrans, TextWriter writer)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId;
@@ -1070,7 +1073,7 @@ namespace SalesForceAttachmentsBackupTools
                 KeyValuePair<string, string> att;
                 HttpResponseMessage response = null;
 
-                if (minSizeQueue.TryDequeue(out att))
+                if (queue.TryDequeue(out att))
                 {
                     byte[] valueBytes = null;
                     try
@@ -1138,7 +1141,7 @@ namespace SalesForceAttachmentsBackupTools
                 }
                 else
                 {
-                    minSizeQueue.Close();
+                    queue.Close();
                     break;
                 }
             }
@@ -1158,7 +1161,7 @@ namespace SalesForceAttachmentsBackupTools
             PwDatabase PwDB = new PwDatabase();
             IOConnectionInfo mioInfo = new IOConnectionInfo
             {
-                Path = pathToKeePassDb
+                Path = pathKDBX
             };
             CompositeKey compositeKey = new CompositeKey();
             if (!UseWinLogon)
@@ -1468,7 +1471,7 @@ namespace SalesForceAttachmentsBackupTools
             {
                 Timer timer = new Timer(new TimerCallback((e) =>
                 {
-                    Console.Write("\rWait for {0} seconds or press any key to exit...", (i--).ToString("D2"));
+                    Console.Write("\rWait for {0} seconds or press any key to exit...", (--i).ToString("D2"));
                 }), null, 1, 1000);
             });
             Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
@@ -1485,7 +1488,7 @@ namespace SalesForceAttachmentsBackupTools
             "\nWrite - to read the data from encrypted file and store them back into the SF org;" +
             "\nCompare - to compare the data from the encrypted file and SF org;" +
             "\nPrepare - to prepare Crypto stuff in the given KDBX file (adds correctly filled AESPassword, Salt and IV records)" +
-            "\nSubset - to store a subset in the RDB (filter can be applied). Requires SQLLDR.EXE presence in the script folder!",
+            "\nSubset - to store a subset in the RDB (filter can be applied).",
             MetaValue = "Read")]
 
         public WorkingModes WorkMode { get; set; }
