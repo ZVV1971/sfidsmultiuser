@@ -51,15 +51,15 @@ namespace SalesForceAttachmentsBackupTools
         private static int numberOfThreads;
         private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
         private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
-        private static readonly int bulkQueryLengthLimit = 100000;  //The limit imposed by the SalesForce on the bulk query length
-        private static readonly HttpClient client = new HttpClient();
+        private static int bulkQueryLengthLimit = 100000;           //The limit imposed by the SalesForce on the bulk query length
+        private static HttpClient client = new HttpClient();
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
         private static List<string> listOfIds = null;               //Either list of Ids for Read, Write and Compare mode or list of SF Objects
         private static JToken listOfNonSensitivePairs = null;                                  //list of object-field pairs that schould not come into copy
         private static MinSizeQueue<KeyValuePair<string, string>> minSizeQueue;                 //A queue of Id and Base64-encoded binary attachment to process by the workers
         private static TimeSpan waittime = TimeSpan.FromSeconds(30);                            //Time to wait before console closure
-        private static readonly ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener() { Name = "AttBkp"};
+        private static ConsoleTraceListener consoleTraceListener = new ConsoleTraceListener();
         private static bool useWindowsLogon = false;                                            //Use windows authentication to open KBDX
         private static SymmetricAlgorithm cipher;
         private static Dictionary<string, ProtectedString> credentialsDict;
@@ -68,7 +68,7 @@ namespace SalesForceAttachmentsBackupTools
         static async Task Main(string[] args)
         {
             //Parse the arguments
-            _ = Parser.Default.ParseArguments<Options>(args)
+            int result = Parser.Default.ParseArguments<Options>(args)
                 .MapResult(
                 (Options opt) =>
                 {
@@ -299,12 +299,27 @@ namespace SalesForceAttachmentsBackupTools
                     }
                     break;
                 case WorkingModes.Subset:
-                    if (pathToJSONfile != null && !pathToJSONfile.Equals(String.Empty)) salesForceSID.Add("pathToJson", pathToJSONfile);
-                    //Get List of SF Objects to be processed and the list of the non-sensitive fields in a form of pairs
+                    if (pathToJSONfile != null && !pathToJSONfile.Equals(String.Empty)) 
+                    { 
+                        salesForceSID.Add("pathToJson", pathToJSONfile); 
+                    }
                     Tuple<IEnumerable<string>, JToken> jsonParseResult = await GetListOfObjects(salesForceSID, filter);
                     listOfIds = jsonParseResult.Item1.ToList<string>();
                     listOfNonSensitivePairs = jsonParseResult.Item2;
 
+                    //If target folder or file path has been given store absolute folder path to the dictionary
+                    if (pathToComparisonResults != null && !pathToComparisonResults.Equals(String.Empty))
+                    {
+                        try
+                        {
+                            salesForceSID.Add("targetPath", Path.GetDirectoryName(pathToComparisonResults));
+                        }
+                        catch 
+                        {
+                            Trace.TraceError("Error handling target path. Set to the local script folder");
+                            salesForceSID.Add("targetPath", Directory.GetCurrentDirectory());
+                        }
+                    }
                     Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
                     
                     //Pass a new list to each thread to get the files that need to be cleared up
@@ -546,8 +561,8 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="listOfIds">List of objects to be processed</param>
         /// <param name="creds">credentials</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, 
-            IDictionary<string, ProtectedString> ORCLcreds, JToken excludeFields)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string
+            , ProtectedString> ORCLcreds, JToken excludeFields)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
@@ -698,7 +713,11 @@ namespace SalesForceAttachmentsBackupTools
                         do {
                             bool commaFlag = false;
                             StringBuilder limitedWhereCondition = new StringBuilder();
-                            StringBuilder fieldsList = new StringBuilder("SELECT Id," + arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                            if (needsToSubset)
+                            {
+                                //define the length of its variable fields parts
+                                limitedWhereCondition.Append(" WHERE Id IN(");
+                                int initialQueryLength = ("SELECT Id," + arrFields.Where(t => t["updateable"].ToString().Equals("True"))
                                     .Select(o => o["name"].ToString())
                                     //Exclude the non-sensitive fileds pecific to the current Object
                                     .Except(listOfNonSensitivePairs
@@ -711,12 +730,7 @@ namespace SalesForceAttachmentsBackupTools
                                         )
                                     .Aggregate("", (c, n) => $"{c},{n}")
                                     .TrimStart(',')
-                                    + " FROM " + currObject);
-                            if (needsToSubset)
-                            {
-                                //define the length of its variable fields parts to take care of the length of the query
-                                limitedWhereCondition.Append(" WHERE Id IN(");
-                                int initialQueryLength = fieldsList.Length + limitedWhereCondition.Length;
+                                    + " FROM " + currObject + " WHERE Id IN()").Length;
                                 //append to the WHERE condition as long as there are enough Ids or the length treshold is not overcome
                                 while (initialQueryLength + limitedWhereCondition.Length 
                                     //21 is the length of the quoted Id plus comma
@@ -737,9 +751,26 @@ namespace SalesForceAttachmentsBackupTools
                             var jobJsonObj = new
                             {
                                 operation = "query",
-                                query = fieldsList.ToString()
-                                    //If needs to subset then add WHERE IN condition
-                                    + limitedWhereCondition.ToString(),
+                                query = "SELECT Id," +
+                                //Begin with only updateable fields since it is most probable that those not allowed for bulk querying 
+                                //will be amongst them
+                                arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                    .Select(o => o["name"].ToString())
+                                        //Exclude the non-sensitive fields specific to the current Object        
+                                        .Except(listOfNonSensitivePairs
+                                        .Select(t => t[currObject]?.ToString())
+                                        .Where(t => t != null)
+                                        //Exclude the non-sensitive fields common to all Objects
+                                        .Concat(listOfNonSensitivePairs
+                                        .Select(t => t["AnyObject"]?.ToString())
+                                        .Where(t => t != null))
+                                        )
+                                //A selector condition must be added here
+                                    .Aggregate("", (c, n) => $"{c},{n}")
+                                    .TrimStart(',')
+                                + " FROM " + currObject
+                                //If needs to subset then add WHERE IN condition
+                                + limitedWhereCondition.ToString(),
                                 contentType = "CSV",
                                 columnDelimiter = "PIPE",
                                 lineEnding = "CRLF"
@@ -901,8 +932,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="cryptoTrans">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="writer">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, 
-            ICryptoTransform cryptoTrans, TextWriter writer)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId;
@@ -965,8 +995,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="obj">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="cryptoTrans">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>
-        private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, 
-            ICryptoTransform cryptoTrans) 
+        private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
         {
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
@@ -974,7 +1003,7 @@ namespace SalesForceAttachmentsBackupTools
             while (true) 
             {
                 KeyValuePair<string, string> att;
-                if (queue.TryDequeue(out att))
+                if (minSizeQueue.TryDequeue(out att))
                 {
                     byte[] valueBytes = null;
                     try
@@ -1040,7 +1069,7 @@ namespace SalesForceAttachmentsBackupTools
                 }
                 else 
                 {
-                    queue.Close();
+                    minSizeQueue.Close();
                     break; 
                 }
             }
@@ -1060,8 +1089,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="cryptoTrans">Cryptographic stuff necessary to decrypt the backup content</param>
         /// <param name="writer">A shared text stream to store the comparison results into</param>
         /// <returns></returns>
-        private static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, 
-            ICryptoTransform cryptoTrans, TextWriter writer)
+        private static async Task doWork(MinSizeQueue<KeyValuePair<string, string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId;
@@ -1073,7 +1101,7 @@ namespace SalesForceAttachmentsBackupTools
                 KeyValuePair<string, string> att;
                 HttpResponseMessage response = null;
 
-                if (queue.TryDequeue(out att))
+                if (minSizeQueue.TryDequeue(out att))
                 {
                     byte[] valueBytes = null;
                     try
@@ -1141,7 +1169,7 @@ namespace SalesForceAttachmentsBackupTools
                 }
                 else
                 {
-                    queue.Close();
+                    minSizeQueue.Close();
                     break;
                 }
             }
@@ -1161,7 +1189,7 @@ namespace SalesForceAttachmentsBackupTools
             PwDatabase PwDB = new PwDatabase();
             IOConnectionInfo mioInfo = new IOConnectionInfo
             {
-                Path = pathKDBX
+                Path = pathToKeePassDb
             };
             CompositeKey compositeKey = new CompositeKey();
             if (!UseWinLogon)
@@ -1471,7 +1499,7 @@ namespace SalesForceAttachmentsBackupTools
             {
                 Timer timer = new Timer(new TimerCallback((e) =>
                 {
-                    Console.Write("\rWait for {0} seconds or press any key to exit...", (--i).ToString("D2"));
+                    Console.Write("\rWait for {0} seconds or press any key to exit...", (i--).ToString("D2"));
                 }), null, 1, 1000);
             });
             Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
@@ -1488,7 +1516,7 @@ namespace SalesForceAttachmentsBackupTools
             "\nWrite - to read the data from encrypted file and store them back into the SF org;" +
             "\nCompare - to compare the data from the encrypted file and SF org;" +
             "\nPrepare - to prepare Crypto stuff in the given KDBX file (adds correctly filled AESPassword, Salt and IV records)" +
-            "\nSubset - to store a subset in the RDB (filter can be applied).",
+            "\nSubset - to store a subset in the RDB (filter can be applied). Requires SQLLDR.EXE presence in the script folder!",
             MetaValue = "Read")]
 
         public WorkingModes WorkMode { get; set; }
@@ -1554,7 +1582,8 @@ namespace SalesForceAttachmentsBackupTools
         [Option("excludeobjects", Default = null, MetaValue = "D:\\ObjectsToExclude.json",
             HelpText = "Sets path to the JSON file that must contain the array with object names to be excluded from the listing."
             + "\nHere should be mentioned updateable objects that definitely do not contain sensitive information"
-            + "\nImportant in subset mode. {\"ObjectsToExclude\":[\"Attachment\", \"Document\"],\"FieldsToExclude:[\"Jigsaw\",\"Sic\"]\"}")]
+            + "\nImportant in subset mode. {\"ObjectsToExclude\":[\"Attachment\", \"Document\"]," +
+            "\"FieldsToExclude:[{\"Account\":\"Jigsaw\"},{\"AnyObject\":\"Sic\"}]\"}")]
         public string PathToExcludeObjectsJson { get; set; }
 
         [Option("subsetpercentage", Default = 100, MetaValue = "50",
