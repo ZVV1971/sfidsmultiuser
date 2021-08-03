@@ -5,7 +5,7 @@ VisualStudioVersion = 16.0.30406.217
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "sfidsmultiuser", "sfidsmultiuser\sfidsmultiuser.csproj", "{1ED12C8A-A895-4C80-9BA2-C0BF6E6ACBA4}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "testconsole", "testconsole\testconsole.csproj", "{E43BADF9-5D8E-4ED6-97B5-460BC85DB02F}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AttachmentsBackUp", "testconsole\AttachmentsBackUp.csproj", "{E43BADF9-5D8E-4ED6-97B5-460BC85DB02F}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{BF0561C2-2B1C-4611-9A7D-7BCA6604A822}"
 EndProject
@@ -48,8 +48,8 @@ Global
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
-		BuildVersion_UseGlobalSettings = True
-		SolutionGuid = {946F2444-B39F-4A61-9F3B-5C61D3BD669B}
 		BuildVersion_StartDate = 2000/1/1
+		SolutionGuid = {946F2444-B39F-4A61-9F3B-5C61D3BD669B}
+		BuildVersion_UseGlobalSettings = True
 	EndGlobalSection
 EndGlobal

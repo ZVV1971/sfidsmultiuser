@@ -331,8 +331,8 @@ namespace RepresentativeSubset
 
             int NumberOfRecords = Math.Min(MinNumber, ReturnValue.ToList<T>().Count * SubsetPercentage / 100);
 
-            //Shuffle and take an half till the number is less or equal to the required one
-            while (ReturnValue.Count >= NumberOfRecords)
+            //Shuffle and take an half till the number is less then the required one
+            while (ReturnValue.Count - 1 > NumberOfRecords)
             {
                 ReturnValue = Quarter(Shuffle(ReturnValue)) as List<T>;
             }
