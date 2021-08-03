@@ -52,7 +52,7 @@ namespace RepresentativeSubset.Tests
         {
             IEnumerable<int> i = new int[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
             IEnumerable<int> ot = SubsetHelper<int>.Shuffle(i);
-            Assert.AreEqual(i.ToList().Count, ot.ToList().Count);
+            Assert.AreEqual(i.ToList().Count, ot.ToList().Count, $"Excpected {i.ToList().Count}; actial {ot.ToList().Count}");
         }
 
         [TestMethod("Checks that the input is not equal to the output")]

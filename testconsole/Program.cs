@@ -361,7 +361,7 @@ namespace SalesForceAttachmentsBackupTools
             Trace.TraceInformation("Getting the list of the objects, please, wait it may take a little while...");
             HttpResponseMessage listOfObjects = await ReadFromSalesForce(new Uri(dic["serverUrl"] + "/sobjects/"), 
                 dic, HttpMethod.Get, null);
-            JArray arr = JArray.Parse(JObject.Parse(await listOfObjects.Content.ReadAsStringAsync())["sobjects"].ToString());
+            JArray arr = JArray.Parse(JObject.Parse(await listOfObjects?.Content?.ReadAsStringAsync())["sobjects"].ToString());
             Trace.TraceInformation($"Got totally {arr.Count} objects");
             Trace.TraceInformation($"Amongst them only {arr.Where(t => t["updateable"].ToString().Equals("True")).Count()} are updatable");
             
@@ -579,6 +579,7 @@ namespace SalesForceAttachmentsBackupTools
             HttpResponseMessage resp = null;
             StringBuilder createSQL = new StringBuilder();
 
+            //A loop till the queue is not empty
             do
             {
                 //Initialize variables for every object
@@ -714,7 +715,9 @@ namespace SalesForceAttachmentsBackupTools
                         //And there is no way to select random IDs except by naming them in the query -- no more than 4750 'Ids'
                         int indexOfId = 0;
                         int runNumber = 0;
-                        //
+                        List<Task> idJobs = new List<Task>();
+                        CancellationTokenSource source = new CancellationTokenSource();
+                        //For every batch (run)
                         do {
                             bool commaFlag = false;
                             StringBuilder limitedWhereCondition = new StringBuilder();
@@ -766,27 +769,27 @@ namespace SalesForceAttachmentsBackupTools
                                 lineEnding = "CRLF"
                             };
 
-                            //Continue to compose a SQL query to create a table
-                            foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True"))
-                                    .Select(o => o["name"].ToString())
-                                    .Except((excludeFields ?? JToken.Parse("{}"))
-                                            //Exclude the non-sensitive fields for the specific Object
-                                            .Select(t => t[currObject]?.ToString())
-                                            .Where(t => t != null)
-                                            //Exclude the non-sensitive fields common to all and Objects
-                                            .Concat((excludeFields ?? JToken.Parse("{}"))
-                                            .Select(t => t["AnyObject"]?.ToString())
-                                            .Where(t => t != null))
-                                        )
-                                    )
-                            {
-                                createSQL.Append($",\"{s.ToUpper()}\" VARCHAR2(4000)");
-                            }
-                            createSQL.Append(")");
-
                             //Run table creation task in an async mode with no await only in the first batch
                             if (runNumber <= 1)
                             {
+                                //Continue to compose a SQL query to create a table
+                                foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                        .Select(o => o["name"].ToString())
+                                        .Except((excludeFields ?? JToken.Parse("{}"))
+                                                //Exclude the non-sensitive fields for the specific Object
+                                                .Select(t => t[currObject]?.ToString())
+                                                .Where(t => t != null)
+                                                //Exclude the non-sensitive fields common to all and Objects
+                                                .Concat((excludeFields ?? JToken.Parse("{}"))
+                                                .Select(t => t["AnyObject"]?.ToString())
+                                                .Where(t => t != null))
+                                            )
+                                        )
+                                {
+                                    createSQL.Append($",\"{s.ToUpper()}\" VARCHAR2(4000)");
+                                }
+                                createSQL.Append(")");
+
                                 Trace.TraceInformation($"Thread {guid} creates a table in the Oracle instance to hold the data of the {currObject}");
                                 ORCLTask = Task.Run(() =>
                                 {
@@ -806,101 +809,109 @@ namespace SalesForceAttachmentsBackupTools
                                         oc.Close();
                                     }
                                 });
+                                Trace.TraceInformation($"Thread {guid} is waiting for {ORCLTask?.Id} to complete DDL for the {currObject}");
+                                ORCLTask?.Wait();
+                                if (ORCLTask?.Status != TaskStatus.RanToCompletion)
+                                {
+                                    Trace.TraceError($"Thread {guid}: DDL creation task {ORCLTask?.Id} for the {currObject} has failed. Data are dropped");
+                                    //Stop dealing with the object
+                                    break;
+                                }
                             }
 
-                            HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
-                                , creds, HttpMethod.Post, JsonConvert.SerializeObject(jobJsonObj));
+                            //Run the process getting the data in a separate thread
+                            idJobs.Add(Task.Run(async () =>                                {
+                                    int iniSleep = 3;
+                                    int rnNumber = runNumber;
+                                    HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
+                                        , creds, HttpMethod.Post, JsonConvert.SerializeObject(jobJsonObj));
 
-                            if(jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
-                            {
-                                JObject jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
-                                Trace.TraceInformation($"Thread {guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
-                            
-                                //Loop to wait till the job has completed (or failed)
-                                while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
-                                {
-                                    //Every time the loop will wait an half as longer as the previous time
-                                    initialSleep = (int)(initialSleep * 1.5);
-                                    Trace.TraceInformation($"Thread {guid} is sleeping for {initialSleep} seconds then will check results...");
-                                    Thread.Sleep(initialSleep * 1000);
-                                
-                                    //Requests for job completion or failure
-                                    jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
-                                        , creds, HttpMethod.Get);
                                     if (jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
                                     {
-                                        jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                        JObject jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                        Trace.TraceInformation($"Thread {guid} has queued a job {jobInfo["id"]} to get the data from the {currObject} object");
+
+                                        //Loop to wait till the job has completed (or failed)
+                                        while (jobInfo["state"].ToString().Equals("InProgress") || jobInfo["state"].ToString().Equals("UploadComplete"))
+                                        {
+                                            //Every time the loop will wait an half as longer as the previous time
+                                            iniSleep = (int)(iniSleep * 1.5);
+                                            Trace.TraceInformation($"Thread {guid} is sleeping for {iniSleep} seconds then will check results for the run #{rnNumber}");
+                                            Thread.Sleep(iniSleep * 1000);
+
+                                            //Requests for job completion or failure
+                                            jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"])
+                                                , creds, HttpMethod.Get);
+                                            if (jobresp != null && jobresp.Content != null && jobresp.StatusCode == HttpStatusCode.OK)
+                                            {
+                                                jobInfo = JObject.Parse(await jobresp.Content.ReadAsStringAsync());
+                                            }
+                                            else
+                                            {
+                                                jobInfo["state"] = "UnknowError";
+                                                break;
+                                            }
+                                        }
+                                        if (jobInfo["state"].ToString().Equals("JobComplete"))
+                                        {
+                                            //The job has successfully completed
+                                            //Need to read the CSV data
+                                            jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
+                                                , creds, HttpMethod.Get, accepts: "txt/csv");
+
+                                            Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
+                                            _ = Task.Run(async () =>
+                                            {
+                                                using (OracleConnection con = new OracleConnection())
+                                                {
+                                                    con.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; " +
+                                                        $"Password={ORCLcreds["ORCLPassword"].ReadString()}; " +
+                                                        $"Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
+                                                    con.Open();
+                                                    using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
+                                                    using (var csv = new CsvReader(inputStreamReader,
+                                                        new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
+                                                    using (var dr = new CsvDataReader(csv))
+                                                    {
+                                                        DataTable dt = new DataTable();
+                                                        dt.Load(dr);
+                                                        OracleBulkCopy bulkCopy = new OracleBulkCopy(con)
+                                                        {
+                                                            DestinationTableName = $"T{guid.ToString("N").Substring(0, 4)}_{currObject}",
+                                                            BatchSize = 10000,
+                                                        }
+                                                        ;
+                                                        for (int i = 0; i < dt.Columns.Count; i++)
+                                                        {
+                                                            bulkCopy.ColumnMappings.Add(i, i);
+                                                        }
+                                                        bulkCopy.WriteToServer(dt);
+                                                        bulkCopy.Close();
+                                                    }
+                                                    con.Close();
+                                                }
+                                            });
+                                        }
+                                        else // Job is NOT complete
+                                        {
+                                            Trace.TraceError($"Thread {guid} has caught an error processing Bulk job {jobInfo?["id"]} for the {currObject} with the state {jobInfo["state"]}");
+                                            source.Cancel();
+                                        }
                                     }
                                     else
                                     {
-                                        jobInfo["state"] = "UnknowError";
-                                        break;
+                                        Trace.TraceError($"Thread {guid} has caught an error creating Bulk job for the {currObject}");
+                                        source.Cancel();
                                     }
-                                }
-                                if (jobInfo["state"].ToString().Equals("JobComplete"))
-                                {
-                                    //The job has successfully completed
-                                    //Need to read the CSV data
-                                    jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
-                                        , creds, HttpMethod.Get, accepts: "txt/csv");
-
-                                    //On the first run wait for the task that executes the DDL
-                                    if (runNumber <= 1)
-                                    {
-                                        Trace.TraceInformation($"Thread {guid} is waiting for {ORCLTask?.Id} to complete DDL for the {currObject}");
-                                        ORCLTask?.Wait();
-                                        if (ORCLTask?.Status != TaskStatus.RanToCompletion)
-                                        {
-                                            Trace.TraceError($"Thread {guid}: DDL creation task {ORCLTask?.Id} for the {currObject} has failed. Data are dropped");
-                                            //Stop dealing with the object
-                                            break;
-                                        }
-                                    }
-
-                                    Trace.TraceInformation($"Thread {guid} is pushing the batch #{runNumber} of the {currObject} to the Oracle instance");
-                                    _ = Task.Run(async () =>
-                                    {
-                                        using (OracleConnection con = new OracleConnection())
-                                        {
-                                            con.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; " +
-                                                $"Password={ORCLcreds["ORCLPassword"].ReadString()}; " +
-                                                $"Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
-                                            con.Open();
-                                            using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
-                                            using (var csv = new CsvReader(inputStreamReader, 
-                                                new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
-                                            using (var dr = new CsvDataReader(csv))
-                                            {
-                                                DataTable dt = new DataTable();
-                                                dt.Load(dr);
-                                                OracleBulkCopy bulkCopy = new OracleBulkCopy(con) 
-                                                {
-                                                    DestinationTableName = $"T{guid.ToString("N").Substring(0, 4)}_{currObject}", 
-                                                    BatchSize = 10000, }
-                                                ;
-                                                for (int i = 0; i < dt.Columns.Count; i++)
-                                                {
-                                                    bulkCopy.ColumnMappings.Add(i, i);
-                                                }
-                                                bulkCopy.WriteToServer(dt);
-                                                bulkCopy.Close();
-                                            }
-                                            con.Close();
-                                        }
-                                    });
-                                }
-                                else // Job is NOT complete
-                                {
-                                    Trace.TraceError($"Thread {guid} has caught an error processing Bulk job {jobInfo?["id"]} for the {currObject} with the state {jobInfo["state"]}");
-                                    continue;
-                                }
-                            }
-                            else
-                            {
-                                Trace.TraceError($"Thread {guid} has caught an error creating Bulk job for the {currObject}");
-                                continue;
-                            }
+                                }, source.Token) //Per-run task defined
+                            );
                         } while (needsToSubset && indexOfId < mixedIds.Count);
+                        Trace.TraceInformation($"Thread {guid} is waiting for all runs ({runNumber}) to finish");
+                        Task.WaitAll(idJobs.ToArray());
+                        if (idJobs.Count(t=>t.IsCanceled || t.IsFaulted) != 0)
+                        {
+                            Trace.TraceError($"Thread {guid} has got {idJobs.Count(t => t.IsCanceled || t.IsFaulted)} batches not-pushed");
+                        }
                     }
                     else
                     {
@@ -1155,7 +1166,7 @@ namespace SalesForceAttachmentsBackupTools
                                 }
                                 catch (Exception ex)
                                 {
-                                    Trace.TraceError($"{ex.Message}\noccured while trying to compare {att.Key} from {guid}");
+                                    Trace.TraceError($"{ex.Message}\noccured while trying to compare {att.Key} from thread {guid}");
                                 }
                             }
                         }

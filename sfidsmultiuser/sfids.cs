@@ -347,21 +347,22 @@ namespace RepresentativeSubset
         public static IEnumerable<T> Shuffle (IEnumerable<T> OriginalSubset)
         {
             RNGCryptoServiceProvider rngCsp = new RNGCryptoServiceProvider();
-            //Random rnd = new Random();
             List<T> lt = OriginalSubset.ToList<T>();
-            List<T> rlst = new List<T>();
-            byte[] RandomNumber = new byte[4];
-            while (lt.Count > 0)
+            bool[] map = new bool[lt.Count];
+            T[] arr = new T[lt.Count];
+            int j = 0;                      //An index
+            byte[] RandomNumber = new byte[4 * lt.Count];
+            rngCsp.GetBytes(RandomNumber);
+            while (j < lt.Count)
             {
-                rngCsp.GetBytes(RandomNumber);
-                UInt32 i = BitConverter.ToUInt32 (RandomNumber, 0);
+                UInt32 i = BitConverter.ToUInt32(RandomNumber, 0 + j * 4);
                 int NumberToPick = (int)(i % lt.Count);
-                //int NumberToPick = rnd.Next(lt.Count);
-                rlst.Add(lt[NumberToPick]);
-                lt.RemoveAt(NumberToPick);
+                while (map[NumberToPick]) if (++NumberToPick >= lt.Count) NumberToPick = 0;
+                map[NumberToPick] = true;
+                arr[j++] = lt[NumberToPick];
             }
             rngCsp.Dispose();
-            return rlst;
+            return new List<T>(arr);
         }
         
         /// <summary>
