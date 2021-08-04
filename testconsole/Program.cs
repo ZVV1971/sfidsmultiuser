@@ -233,7 +233,7 @@ namespace SalesForceAttachmentsBackupTools
                     {
                         Trace.TraceError("Nothing to extract. Exiting...");
                         WaitExitingCountdown(waittime);
-                        Environment.Exit(-2);
+                        Environment.Exit((int)ExitCodes.NothingToReadError);
                     }
                     break;
                 case WorkingModes.Write:
@@ -242,11 +242,39 @@ namespace SalesForceAttachmentsBackupTools
                     {
                         Trace.TraceError("Source file does not exist. Exiting...");
                         WaitExitingCountdown(waittime);
-                        Environment.Exit(-3);
+                        Environment.Exit((int)ExitCodes.SourceFileDoesNorExistsError);
                     }
                     break;
                 case WorkingModes.Subset:
                     listOfIds = new List<string>();
+                    using (OracleConnection con = new OracleConnection())
+                    {
+                        try
+                        {
+                            con.ConnectionString = $"User ID={credentialsDict["ORCLUserName"].ReadString()}; " +
+                            $"Password={credentialsDict["ORCLPassword"].ReadString()}; " +
+                            $"Data Source={credentialsDict["ORCLDataSource"].ReadString()};";
+                            con.Open();
+                            OracleCommand cmd = new OracleCommand("SELECT 1 FROM DUAL", con);
+                            cmd.ExecuteScalar();
+                            //The Orcle command executed OK therefore the Connection String could be passed as a Protected string in a dictionary
+                            credentialsDict.Add("ORCLConnectionString", 
+                                new ProtectedString(true, $"User ID={credentialsDict["ORCLUserName"].ReadString()}; " +
+                                $"Password={credentialsDict["ORCLPassword"].ReadString()}; " +
+                                $"Data Source={credentialsDict["ORCLDataSource"].ReadString()};"));
+                            Trace.TraceInformation("Target DB connection OK");
+                        }
+                        catch (Exception ex)
+                        {
+                            Trace.TraceError($"Error opening ORACLE connection. Exiting...");
+                            WaitExitingCountdown(waittime);
+                            Environment.Exit((int)ExitCodes.TargetDBConnectionError);
+                        }
+                        finally
+                        {
+                            con.Close();
+                        }
+                    }
                     break;
                 default:
                     break;
@@ -331,7 +359,8 @@ namespace SalesForceAttachmentsBackupTools
                     for (int i = 0; i < numberOfThreads; i++)
                     {
                         tasks.Add(Task.Run(
-                            () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.StartsWith("ORCL")).ToDictionary(k=>k.Key, k=>k.Value),
+                            () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.Equals("ORCLConnectionString"))
+                                .ToDictionary(k=>k.Key, k=>k.Value),
                             listOfNonSensitivePairs)));
                     }
                     Task.WaitAll(tasks.ToArray());
@@ -795,9 +824,7 @@ namespace SalesForceAttachmentsBackupTools
                                 {
                                     using (OracleConnection oc = new OracleConnection())
                                     {
-                                        oc.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; " +
-                                            $"Password={ORCLcreds["ORCLPassword"].ReadString()}; " +
-                                            $"Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
+                                        oc.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
                                         oc.Open();
                                         OracleCommand ocmd = new OracleCommand(createSQL.ToString(), oc);
                                         ocmd.ExecuteNonQuery();
@@ -864,9 +891,7 @@ namespace SalesForceAttachmentsBackupTools
                                             {
                                                 using (OracleConnection con = new OracleConnection())
                                                 {
-                                                    con.ConnectionString = $"User ID={ORCLcreds["ORCLUserName"].ReadString()}; " +
-                                                        $"Password={ORCLcreds["ORCLPassword"].ReadString()}; " +
-                                                        $"Data Source={ORCLcreds["ORCLDataSource"].ReadString()};";
+                                                    con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
                                                     con.Open();
                                                     using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
                                                     using (var csv = new CsvReader(inputStreamReader,
@@ -1630,7 +1655,10 @@ namespace SalesForceAttachmentsBackupTools
         CryptographicStuffAbsenseError = -2,
         GettingSalesForceSessionIDError = -3,
         ComparisonFileIsAbsentError = -4,
-        UnknownError = -999,
-        CredentialsAbsenseError = -5
+        CredentialsAbsenseError = -5,
+        NothingToReadError = -6,
+        SourceFileDoesNorExistsError = -7,
+        TargetDBConnectionError = -8,
+        UnknownError = -999
     }
 }
