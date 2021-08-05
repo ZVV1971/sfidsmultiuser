@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 // набора атрибутов. Измените значения этих атрибутов, чтобы изменить сведения,
 // связанные со сборкой.
 [assembly: AssemblyTitle("AttachmentsBackup")]
-[assembly: AssemblyDescription("The software utility to read, write and compare encrypted attachments in a SalesForce© org.")]
+[assembly: AssemblyDescription("The software utility to read, write and compare encrypted attachments in a SalesForce© org. https://github.com/ZVV1971/sfidsmultiuser")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("EPAM")]
 [assembly: AssemblyProduct("")]

@@ -82,9 +82,8 @@ namespace RepresentativeSubset.Tests
 
             Stopwatch watch = Stopwatch.StartNew();
 
-            IEnumerable<string> res = SubsetHelper<string>.Shuffle(array1);
-            IEnumerable<string> ot = SubsetHelper<string>.Quarter(res);
-
+            _= SubsetHelper<string>.Quarter(SubsetHelper<string>.Shuffle(array1));
+            
             watch.Stop();
 
             Assert.IsTrue(watch.ElapsedMilliseconds <= 100, "The execution took {0} miliseconds", watch.ElapsedMilliseconds);
@@ -96,9 +95,10 @@ namespace RepresentativeSubset.Tests
             string[] array1 = new string[13000000];
             for (int i = 0; i < array1.Length; i++) array1[i] = i.ToString();
 
+            Debug.WriteLine("Finished creation of the array");
             Stopwatch watch = Stopwatch.StartNew();
 
-            IEnumerable<string> res = SubsetHelper<string>.Shuffle(array1);
+            _ = SubsetHelper<string>.Shuffle(array1);
 
             watch.Stop();
 

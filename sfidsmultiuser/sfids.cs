@@ -355,14 +355,13 @@ namespace RepresentativeSubset
             rngCsp.GetBytes(RandomNumber);
             while (j < lt.Count)
             {
-                UInt32 i = BitConverter.ToUInt32(RandomNumber, 0 + j * 4);
-                int NumberToPick = (int)(i % lt.Count);
+                int NumberToPick = (int)(BitConverter.ToUInt32(RandomNumber, 0 + j * 4) % lt.Count);
                 while (map[NumberToPick]) if (++NumberToPick >= lt.Count) NumberToPick = 0;
                 map[NumberToPick] = true;
                 arr[j++] = lt[NumberToPick];
             }
             rngCsp.Dispose();
-            return new List<T>(arr);
+            return arr;
         }
         
         /// <summary>
@@ -372,13 +371,12 @@ namespace RepresentativeSubset
         /// <returns></returns>
         public static IEnumerable<T> Quarter (IEnumerable<T> OriginalSubset)
         {
-            List<T> res = new List<T>();
             List<T> lt = OriginalSubset.ToList<T>();
+            T[] res = new T[lt.Count];
             for (int i = 0; i < lt.Count; i++)
             {
-                if (i % 2 == 0) res.Add(lt[i]);
+                if (i % 2 == 0) res[i] = lt[i];
             }
-
             return res;
         }
     }
