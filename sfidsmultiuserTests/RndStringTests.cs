@@ -82,7 +82,7 @@ namespace RepresentativeSubset.Tests
 
             Stopwatch watch = Stopwatch.StartNew();
 
-            _= SubsetHelper<string>.Quarter(SubsetHelper<string>.Shuffle(array1));
+            _= SubsetHelper<string>.MakeSubset(array1);
             
             watch.Stop();
 

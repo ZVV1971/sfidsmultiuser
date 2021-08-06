@@ -315,7 +315,7 @@ namespace RepresentativeSubset
         /// <returns></returns>
         public static IEnumerable<T> MakeSubset( IEnumerable<T> OriginalSet, 
             [Range(minimum: 0, maximum: 100, ErrorMessage = "Percentage out of range")] 
-            int SubsetPercentage = 10, 
+            int SubsetPercentage = 50, 
             int MinNumber = int.MaxValue)
         {
             if (SubsetPercentage <=0)
@@ -327,14 +327,22 @@ namespace RepresentativeSubset
                 throw new ArgumentOutOfRangeException("SubsetPercentage", SubsetPercentage, "Argument cannot be greater than 100");
             }
 
-            List<T> ReturnValue = new List<T>(OriginalSet);
+            T[] ReturnValue = OriginalSet.ToArray();
 
-            int NumberOfRecords = Math.Min(MinNumber, ReturnValue.ToList<T>().Count * SubsetPercentage / 100);
+            int NumberOfRecords = Math.Min(MinNumber, ReturnValue.Length * SubsetPercentage / 100);
 
+            float[] ratios = new float[] { (float)1 / 2, (float)1 / 3, (float)2 / 3, (float)1 / 5, (float)2 / 5, (float)3 / 5, (float)4 / 5 };
+            KeyValuePair<float, float>[] ratiosDeltas = new KeyValuePair<float, float>[ratios.Length];
             //Shuffle and take an half till the number is less then the required one
-            while (ReturnValue.Count - 1 > NumberOfRecords)
+            while (ReturnValue.Length - 1 > NumberOfRecords)
             {
-                ReturnValue = Quarter(Shuffle(ReturnValue)) as List<T>;
+                for (int i = 0; i < ratios.Length; i++)
+                {
+                    ratiosDeltas[i] = new KeyValuePair<float, float>(ratios[i], (float)NumberOfRecords - (ReturnValue.Length * ratios[i]));
+                }
+
+                float bestRatio = ratiosDeltas.Where(l => Math.Abs(l.Value) == ratiosDeltas.ToList().Min(t => Math.Abs(t.Value))).First().Key;
+                ReturnValue = Quarter(Shuffle(ReturnValue), bestRatio) as T[];
             }
 
             return ReturnValue;
@@ -363,19 +371,24 @@ namespace RepresentativeSubset
             rngCsp.Dispose();
             return arr;
         }
-        
+
         /// <summary>
         /// Performs a quartering (selecting only even parts of the subset divided in four) 
         /// </summary>
         /// <param name="OriginalSubset"></param>
         /// <returns></returns>
-        public static IEnumerable<T> Quarter (IEnumerable<T> OriginalSubset)
+        public static IEnumerable<T> Quarter(IEnumerable<T> OriginalSubset, double ratio = 1 / 2)
         {
             List<T> lt = OriginalSubset.ToList<T>();
-            T[] res = new T[lt.Count];
-            for (int i = 0; i < lt.Count; i++)
+            T[] res = new T[(int)(lt.Count * ratio)];
+            res[0] = lt[0];
+            for (int i = 1; i < lt.Count * ratio; i++)
             {
-                if (i % 2 == 0) res[i] = lt[i];
+                try { res[i] = lt[(int)(i / ratio - 1)]; }
+                catch (Exception ex)
+                {
+                    ;
+                }
             }
             return res;
         }
