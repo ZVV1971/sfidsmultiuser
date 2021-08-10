@@ -753,6 +753,8 @@ namespace SalesForceAttachmentsBackupTools
                         //And there is no way to select random IDs except by naming them in the query -- no more than 4750 'Ids'
                         int indexOfId = 0;
                         int runNumber = 0;
+                        string locator = String.Empty;
+
                         List<Task> idJobs = new List<Task>();
                         CancellationTokenSource source = new CancellationTokenSource();
                         //For every batch (run)
@@ -807,7 +809,6 @@ namespace SalesForceAttachmentsBackupTools
                                 lineEnding = "CRLF"
                             };
 
-                            //Run table creation task in an async mode with no await only in the first batch
                             if (runNumber <= 1)
                             {
                                 //Continue to compose a SQL query to create a table
@@ -827,7 +828,8 @@ namespace SalesForceAttachmentsBackupTools
                                     createSQL.Append($",\"{s.ToUpper()}\" VARCHAR2(4000)");
                                 }
                                 createSQL.Append(")");
-
+                                
+                                //Run table creation task in an async mode with no await only in the first batch
                                 Trace.TraceInformation($"Thread {guid} creates a table in the Oracle instance to hold the data of the {currObject}");
                                 ORCLTask = Task.Run(() =>
                                 {
@@ -890,10 +892,19 @@ namespace SalesForceAttachmentsBackupTools
                                         }
                                         if (jobInfo["state"].ToString().Equals("JobComplete"))
                                         {
-                                            //The job has successfully completed
-                                            //Need to read the CSV data
+                                        //The job has successfully completed
+                                        //Need to read the CSV data
+                                        if (needsToSubset)
+                                        {
                                             jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
                                                 , creds, HttpMethod.Get, accepts: "txt/csv");
+                                        }
+                                        else
+                                        {
+                                            jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results" +
+                                                (locator.Equals(string.Empty) ? "?maxRecords=5000" : "/?" + locator + "&maxRecords=5000"))
+                                                , creds, HttpMethod.Get, accepts: "txt/csv");
+                                        }
 
                                             Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
                                             _ = Task.Run(async () =>
@@ -912,7 +923,7 @@ namespace SalesForceAttachmentsBackupTools
                                                         OracleBulkCopy bulkCopy = new OracleBulkCopy(con)
                                                         {
                                                             DestinationTableName = $"{tableName}",
-                                                            BatchSize = 10000,
+                                                            BatchSize = 5000,
                                                         }
                                                         ;
                                                         for (int i = 0; i < dt.Columns.Count; i++)
@@ -939,7 +950,12 @@ namespace SalesForceAttachmentsBackupTools
                                     }
                                 }, source.Token) //Per-run task defined
                             );
-                        } while (needsToSubset && indexOfId < mixedIds.Count);
+                        } while (
+                            //If the Object needs subsetting then the loop while index is less than Count
+                            //OR if there's no need to subset then loop untill local isn't empty string
+                            (needsToSubset || !locator.Equals(string.Empty)) 
+                            && indexOfId < mixedIds.Count);
+
                         Trace.TraceInformation($"Thread {guid} is waiting for all runs ({runNumber}) to finish");
                         Task.WaitAll(idJobs.ToArray());
                         if (idJobs.Count(t=>t.IsCanceled || t.IsFaulted) != 0)
