@@ -331,7 +331,20 @@ namespace RepresentativeSubset
 
             int NumberOfRecords = Math.Min(MinNumber, ReturnValue.Length * SubsetPercentage / 100);
 
-            float[] ratios = new float[] { (float)1 / 2, (float)1 / 3, (float)2 / 3, (float)1 / 5, (float)2 / 5, (float)3 / 5, (float)4 / 5 };
+            float[] ratios = new float[] { 
+                (float)1 / 2, 
+                (float)1 / 3, 
+                (float)2 / 3, 
+                (float)1 / 5, 
+                (float)2 / 5, 
+                (float)3 / 5, 
+                (float)4 / 5, 
+                (float)3 / 7, 
+                (float)5 / 7,
+                (float)6 / 7,
+                (float)5 / 11,
+                (float)6 / 11,
+                (float)10 / 11};
             KeyValuePair<float, float>[] ratiosDeltas = new KeyValuePair<float, float>[ratios.Length];
             //Shuffle and take an half till the number is less then the required one
             while (ReturnValue.Length - 1 > NumberOfRecords)

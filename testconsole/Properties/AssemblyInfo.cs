@@ -6,11 +6,11 @@ using System.Runtime.InteropServices;
 // набора атрибутов. Измените значения этих атрибутов, чтобы изменить сведения,
 // связанные со сборкой.
 [assembly: AssemblyTitle("AttachmentsBackup")]
-[assembly: AssemblyDescription("The software utility to read, write and compare encrypted attachments in a SalesForce© org. https://github.com/ZVV1971/sfidsmultiuser")]
+[assembly: AssemblyDescription("The software utility to read, write and compare encrypted attachments in a SalesForce© org")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("EPAM")]
 [assembly: AssemblyProduct("")]
-[assembly: AssemblyCopyright("Copyright ZVV©  2020, 2021")]
+[assembly: AssemblyCopyright("Copyright ZVV©  2020, 2021 https://github.com/ZVV1971/sfidsmultiuser")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -32,5 +32,5 @@ using System.Runtime.InteropServices;
 // Можно задать все значения или принять номер сборки и номер редакции по умолчанию.
 // используя "*", как показано ниже:
 // [assembly: AssemblyVersion("1.0.*")]
-[assembly: AssemblyVersion("3.3.2.324")]
-[assembly: AssemblyFileVersion("3.3.2.317")]
+[assembly: AssemblyVersion("3.3.2.330")]
+[assembly: AssemblyFileVersion("3.3.2.323")]

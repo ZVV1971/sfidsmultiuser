@@ -48,6 +48,7 @@ namespace SalesForceAttachmentsBackupTools
         private static string pathToComparisonResults;
         private static string filter;
         private static string pathToJSONfile;
+        private static string prefix;
         private static int numberOfThreads;
         private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
         private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
@@ -247,6 +248,7 @@ namespace SalesForceAttachmentsBackupTools
                     break;
                 case WorkingModes.Subset:
                     listOfIds = new List<string>();
+                    prefix = GeneratePrefix(5);
                     using (OracleConnection con = new OracleConnection())
                     {
                         try
@@ -339,21 +341,12 @@ namespace SalesForceAttachmentsBackupTools
                     listOfIds = jsonParseResult.Item1.ToList<string>();
                     listOfNonSensitivePairs = jsonParseResult.Item2;
 
-                    //If target folder or file path has been given store absolute folder path to the dictionary
-                    if (pathToComparisonResults != null && !pathToComparisonResults.Equals(String.Empty))
-                    {
-                        try
-                        {
-                            salesForceSID.Add("targetPath", Path.GetDirectoryName(pathToComparisonResults));
-                        }
-                        catch 
-                        {
-                            Trace.TraceError("Error handling target path. Set to the local script folder");
-                            salesForceSID.Add("targetPath", Directory.GetCurrentDirectory());
-                        }
-                    }
+                    //Add prefix to the dictionary
+                    salesForceSID.Add("prefix", prefix);
+
                     Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
-                    
+                    Trace.TraceInformation($"Prefix for the tables is {prefix}");
+
                     //Pass a new list to each thread to get the files that need to be cleared up
                     ConcurrentList<string> cleanUpList = new ConcurrentList<string>(numberOfThreads * 2);
                     for (int i = 0; i < numberOfThreads; i++)
@@ -607,6 +600,9 @@ namespace SalesForceAttachmentsBackupTools
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage resp = null;
             StringBuilder createSQL = new StringBuilder();
+            string prfx;
+
+            if (!creds.TryGetValue("prefix", out prfx)) prfx = "ABCDE";
 
             //A loop till the queue is not empty
             do
@@ -623,7 +619,8 @@ namespace SalesForceAttachmentsBackupTools
                 if (currentId < listOfIds.Count && !(listOfIds.ToList())[currentId].Equals(string.Empty))
                 {
                     string currObject = (listOfIds.ToList())[currentId];
-                    createSQL.Append($"CREATE TABLE T{guid.ToString("N").Substring(0,4)}_{currObject} (Id VARCHAR2(18) NOT NULL");
+                    string tableName = ComposeTableName(currObject, guid, prfx);
+                    createSQL.Append($"CREATE TABLE {tableName} (Id VARCHAR2(18) NOT NULL");
                     
                     //Getting number of records in the current object
                     try
@@ -637,6 +634,18 @@ namespace SalesForceAttachmentsBackupTools
                                 , out numberOfRecords)) 
                             {
                                 Trace.TraceInformation($"Thread {guid} has defined that the number of records in the {currObject} is {numberOfRecords}");
+                                if (numberOfRecords == 0)
+                                {
+                                    Trace.TraceInformation($"Thread {guid} has defined that the object {currObject} is empty." +
+                                        $" Nothing to store in DB");
+                                    continue;
+                                }
+                            }
+                            else
+                            {
+                                Trace.TraceError($"Thread {guid} has caught an error getting nunber of records from the {currObject} " +
+                                    $"\nWill proceed anyway assuming the number if infinite");
+                                numberOfRecords = int.MaxValue;
                             }
                         }
                     }
@@ -830,7 +839,7 @@ namespace SalesForceAttachmentsBackupTools
                                         ocmd.ExecuteNonQuery();
                                         //Add a comment to the table where to define the current object
                                         //and designated worker that created it and the timestamp
-                                        ocmd.CommandText = $"COMMENT ON TABLE T{guid.ToString("N").Substring(0, 4)}_{currObject} IS " +
+                                        ocmd.CommandText = $"COMMENT ON TABLE {tableName} IS " +
                                             $"'{currObject} created by the worker {guid} at {String.Format("{0:O}", DateTime.Now)}'";
                                         ocmd.ExecuteNonQuery();
                                         oc.Close();
@@ -902,7 +911,7 @@ namespace SalesForceAttachmentsBackupTools
                                                         dt.Load(dr);
                                                         OracleBulkCopy bulkCopy = new OracleBulkCopy(con)
                                                         {
-                                                            DestinationTableName = $"T{guid.ToString("N").Substring(0, 4)}_{currObject}",
+                                                            DestinationTableName = $"{tableName}",
                                                             BatchSize = 10000,
                                                         }
                                                         ;
@@ -1534,6 +1543,18 @@ namespace SalesForceAttachmentsBackupTools
             });
             Task.Factory.StartNew(() => Console.ReadKey()).Wait(waittime);
         }
+
+        private static string ComposeTableName(string ObjectName, Guid guid, string prefix)
+        {
+            return $"{prefix}_{ObjectName}_{guid.ToString("N").Substring(1,4)}";
+        }
+
+        private static string GeneratePrefix(int len)
+        {
+            Random random = new Random(DateTime.UtcNow.Millisecond);
+            const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            return new string(Enumerable.Repeat(chars, len).Select(s => s[random.Next(s.Length)]).ToArray());
+        }
         #endregion Methods
     }
 
@@ -1546,7 +1567,7 @@ namespace SalesForceAttachmentsBackupTools
             "\nWrite - to read the data from encrypted file and store them back into the SF org;" +
             "\nCompare - to compare the data from the encrypted file and SF org;" +
             "\nPrepare - to prepare Crypto stuff in the given KDBX file (adds correctly filled AESPassword, Salt and IV records)" +
-            "\nSubset - to store a subset in the RDB (filter can be applied). Requires SQLLDR.EXE presence in the script folder!",
+            "\nSubset - to store a subset in the RDB (filter can be applied).",
             MetaValue = "Read")]
 
         public WorkingModes WorkMode { get; set; }
@@ -1630,7 +1651,7 @@ namespace SalesForceAttachmentsBackupTools
         public string ORCLGroupName { get; set; }
         
         [Option("orclentryname", MetaValue = "EPAM_ORCL",
-            HelpText = "Gives the name of the entry where the ORCL credentials must be looked for")]
+            HelpText = "Gives the name of the entry where the ORCL credentials must be looked for. Must contain DataSource description.")]
         public string ORCLEntryName { get; set; }
     }
 
