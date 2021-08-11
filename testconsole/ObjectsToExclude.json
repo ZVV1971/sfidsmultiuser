@@ -684,6 +684,8 @@
     { "Account": "PersonEmailBouncedDate" },
     { "Account": "PersonEmailBouncedReason" },
     { "Account": "Website" },
+    { "Account": "CreatedById" },
+    { "Account": "CreatedDate" },
     { "Contact": "EmailBouncedDate" },
     { "Contact": "EmailBouncedReason" },
     { "Lead": "AnnualRevenue" },

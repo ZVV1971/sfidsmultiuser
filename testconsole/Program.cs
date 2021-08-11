@@ -53,7 +53,7 @@ namespace SalesForceAttachmentsBackupTools
         private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
         private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
         private static int bulkQueryLengthLimit = 100000;           //The limit imposed by the SalesForce on the bulk query length
-        private static HttpClient client = new HttpClient();
+        private static HttpClient client = new HttpClient() { Timeout = Timeout.InfiniteTimeSpan};
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
         private static List<string> listOfIds = null;               //Either list of Ids for Read, Write and Compare mode or list of SF Objects
@@ -662,7 +662,10 @@ namespace SalesForceAttachmentsBackupTools
                         var jsonObj = new
                         {
                             operation = "query",
-                            query = $"SELECT Id FROM {currObject}"
+                            query = $"SELECT Id FROM {currObject}",
+                            contentType = "CSV",
+                            columnDelimiter = "PIPE",
+                            lineEnding = "CRLF"
                         };
                         try
                         {
@@ -697,25 +700,50 @@ namespace SalesForceAttachmentsBackupTools
                                 }
                                 if (jobInfo["state"].ToString().Equals("JobComplete"))
                                 {
-                                    //The job has successfully completed. Need to read the CSV data
-                                    idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
-                                        , creds, HttpMethod.Get, accepts: "txt/csv");
-                                    using (StreamReader inputStreamReader = new StreamReader(await idjobresp.Content.ReadAsStreamAsync()))
+                                    string locator = string.Empty;
+                                    int idBatchNumber = 1;
+
+                                    do
                                     {
-                                        string inputLine;
-                                        bool firstLine = false;
-                                        Trace.TraceInformation($"Thread {guid} is mixing up and quarting Ids for the {currObject} to make necessary subset");
-                                        while ((inputLine = inputStreamReader.ReadLine()) != null)
+                                        //The job has successfully completed. Need to read the CSV data
+                                        if (locator.Equals(string.Empty))
                                         {
-                                            if (firstLine)
-                                            {
-                                                mixedIds.Add(inputLine.Trim(new char[] { '"' }));
-                                            }
-                                            else firstLine = true;
+                                            idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"]
+                                                + "/results?maxRecords=200000")
+                                                , creds, HttpMethod.Get, accepts: "txt/csv");
                                         }
-                                        mixedIds = SubsetHelper<string>.MakeSubset(mixedIds, 
+                                        else
+                                        {
+                                            idjobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"]
+                                                + "/results?locator=" + locator + "&maxRecords=200000")
+                                            , creds, HttpMethod.Get, accepts: "txt/csv");
+                                        }
+
+                                        Trace.TraceInformation($"Thread {guid} is getting the batch #{idBatchNumber} of Ids for {currObject}");
+
+                                        locator = idjobresp.Headers.GetValues("Sforce-Locator").First();
+                                        if (locator.Equals("null")) locator = string.Empty;
+                                        
+                                        using (StreamReader inputStreamReader = new StreamReader(await idjobresp.Content.ReadAsStreamAsync()))
+                                        {
+                                            using (var csv = new CsvReader(inputStreamReader,
+                                                            new CsvConfiguration(CultureInfo.InvariantCulture) { NewLine = "\r\n" }))
+                                            using (var dr = new CsvDataReader(csv))
+                                            {
+                                                DataTable dt = new DataTable();
+                                                dt.Load(dr);
+                                                foreach(DataRow d in dt.Rows)
+                                                {
+                                                    mixedIds.Add(d.ItemArray[0].ToString());
+                                                }
+                                            }
+                                        }
+                                        idBatchNumber++;
+                                    } while (!locator.Equals(string.Empty));
+
+                                    mixedIds = SubsetHelper<string>.MakeSubset(mixedIds,
                                             SubsetPercentage: percentForSubset, MinNumber: minNumberOfRecords).ToList<string>();
-                                    }
+                                    Trace.TraceInformation($"Thread {guid} has mixed up {mixedIds.Count} IDs for the {currObject} object");
                                 }
                             }
                         }
@@ -760,7 +788,12 @@ namespace SalesForceAttachmentsBackupTools
                             bool commaFlag = false;
                             StringBuilder limitedWhereCondition = new StringBuilder();
                             StringBuilder fieldsList = new StringBuilder("SELECT Id,"
-                                + arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                + arrFields.Where(t => t["updateable"].ToString().Equals("True")
+                                        && !t["type"].ToString().Equals("boolean")
+                                        && !t["type"].ToString().Equals("picklist")
+                                        && !t["type"].ToString().Equals("reference")
+                                        && !t["type"].ToString().Equals("double"))
+                                //.Take(200)
                                     .Select(o => o["name"].ToString())
                                     //Exclude the non-sensitive fileds pecific to the current Object
                                     .Except((excludeFields ?? JToken.Parse("{}"))
@@ -811,7 +844,12 @@ namespace SalesForceAttachmentsBackupTools
                             if (runNumber <= 1)
                             {
                                 //Continue to compose a SQL query to create a table
-                                foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True"))
+                                foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True") 
+                                        && !t["type"].ToString().Equals("boolean")
+                                        && !t["type"].ToString().Equals("picklist")
+                                        && !t["type"].ToString().Equals("reference")
+                                        && !t["type"].ToString().Equals("double"))
+                                    //.Take(200)
                                         .Select(o => o["name"].ToString())
                                         .Except((excludeFields ?? JToken.Parse("{}"))
                                                 //Exclude the non-sensitive fields for the specific Object
@@ -892,39 +930,46 @@ namespace SalesForceAttachmentsBackupTools
                                         {
                                             //The job has successfully completed
                                             //Need to read the CSV data
-                                            jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results")
+                                            //Set maxRecords parameter to the greater value so as to force SF to compose all smaller batches (?)
+                                            //in one batch
+                                            jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results?maxRecords=10000")
                                                 , creds, HttpMethod.Get, accepts: "txt/csv");
 
                                             Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
-                                            _ = Task.Run(async () =>
-                                            {
+                                            //_ = Task.Run(async () =>
+                                            //{
                                                 using (OracleConnection con = new OracleConnection())
                                                 {
                                                     con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
                                                     con.Open();
                                                     using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
                                                     using (var csv = new CsvReader(inputStreamReader,
-                                                        new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
+                                                    new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
                                                     using (var dr = new CsvDataReader(csv))
                                                     {
                                                         DataTable dt = new DataTable();
                                                         dt.Load(dr);
-                                                        OracleBulkCopy bulkCopy = new OracleBulkCopy(con)
+                                                        using (OracleBulkCopy bulkCopy = new OracleBulkCopy(con)
+                                                                {
+                                                                    DestinationTableName = $"{tableName}",
+                                                                    //BatchSize = 50000,
+                                                                    //BulkCopyOptions = OracleBulkCopyOptions.Default,
+                                                                    BulkCopyTimeout = 60,
+                                                                    NotifyAfter = 4000
+                                                                })
                                                         {
-                                                            DestinationTableName = $"{tableName}",
-                                                            BatchSize = 10000,
+                                                            for (int i = 0; i < dt.Columns.Count; i++)
+                                                            {
+                                                                bulkCopy.ColumnMappings.Add(i, i);
+                                                            }
+                                                            bulkCopy.OracleRowsCopied += new OracleRowsCopiedEventHandler(OnRowsCopied);
+                                                            bulkCopy.WriteToServer(dt);
+                                                            bulkCopy.Close();
                                                         }
-                                                        ;
-                                                        for (int i = 0; i < dt.Columns.Count; i++)
-                                                        {
-                                                            bulkCopy.ColumnMappings.Add(i, i);
-                                                        }
-                                                        bulkCopy.WriteToServer(dt);
-                                                        bulkCopy.Close();
                                                     }
                                                     con.Close();
                                                 }
-                                            });
+                                            //});
                                         }
                                         else // Job is NOT complete
                                         {
@@ -1555,6 +1600,11 @@ namespace SalesForceAttachmentsBackupTools
             const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
             return new string(Enumerable.Repeat(chars, len).Select(s => s[random.Next(s.Length)]).ToArray());
         }
+
+        private static void OnRowsCopied(object sender, OracleRowsCopiedEventArgs e)
+        {
+            Trace.TraceInformation($"Copied {e.RowsCopied} rows for the {((OracleBulkCopy)sender).DestinationTableName}");
+        }
         #endregion Methods
     }
 
@@ -1637,11 +1687,11 @@ namespace SalesForceAttachmentsBackupTools
             "\"FieldsToExclude:[{\"Account\":\"Jigsaw\"},{\"AnyObject\":\"Sic\"}]\"}")]
         public string PathToExcludeObjectsJson { get; set; }
 
-        [Option("subsetpercentage", Default = 100, MetaValue = "50",
+        [Option("subsetpercentage", Default = 60, MetaValue = "50",
             HelpText ="Sets percentage of the subset. If not set then no subsetting is done and the whole object is processed.")]
         public int SubsetPercentage { get; set; }
 
-        [Option("subsetnumofrec", Default = int.MaxValue, MetaValue = "10000",
+        [Option("subsetnumofrec", Default = int.MaxValue, MetaValue = "100000",
             HelpText ="Sets the required (not more than) number of records in the subset. If not set and no value is given to the "+
             "\n\"subsetpercentage\" then no subsetting is done. The system defines the minimal value from both parameters")]
         public int SubsetNumberOfRecords { get; set; }
