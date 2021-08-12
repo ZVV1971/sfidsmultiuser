@@ -50,6 +50,7 @@ namespace SalesForceAttachmentsBackupTools
         private static string pathToJSONfile;
         private static string prefix;
         private static int numberOfThreads;
+        private static int pushTimeOut;                             //Initial timeout for the bulk packages pushed to the ORACLE instance
         private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
         private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
         private static int bulkQueryLengthLimit = 100000;           //The limit imposed by the SalesForce on the bulk query length
@@ -73,6 +74,7 @@ namespace SalesForceAttachmentsBackupTools
                 .MapResult(
                 (Options opt) =>
                 {
+                    pushTimeOut = opt.PushTimeout;
                     domainName = opt.SalesForceDomain;
                     groupName = opt.GroupName;
                     entryName = opt.EntryName;
@@ -936,8 +938,8 @@ namespace SalesForceAttachmentsBackupTools
                                                 , creds, HttpMethod.Get, accepts: "txt/csv");
 
                                             Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
-                                            //_ = Task.Run(async () =>
-                                            //{
+                                            _ = Task.Run(async () =>
+                                            {
                                                 using (OracleConnection con = new OracleConnection())
                                                 {
                                                     con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
@@ -954,22 +956,61 @@ namespace SalesForceAttachmentsBackupTools
                                                                     DestinationTableName = $"{tableName}",
                                                                     //BatchSize = 50000,
                                                                     //BulkCopyOptions = OracleBulkCopyOptions.Default,
-                                                                    BulkCopyTimeout = 60,
+                                                                    BulkCopyTimeout = pushTimeOut,
                                                                     NotifyAfter = 4000
                                                                 })
                                                         {
                                                             for (int i = 0; i < dt.Columns.Count; i++)
-                                                            {
-                                                                bulkCopy.ColumnMappings.Add(i, i);
-                                                            }
+                                                                {
+                                                                    bulkCopy.ColumnMappings.Add(i, i);
+                                                                }
                                                             bulkCopy.OracleRowsCopied += new OracleRowsCopiedEventHandler(OnRowsCopied);
-                                                            bulkCopy.WriteToServer(dt);
-                                                            bulkCopy.Close();
+                                                            try
+                                                            {
+                                                                bulkCopy.WriteToServer(dt);
+                                                            }
+                                                            catch (AggregateException aex)
+                                                            {
+                                                                if (aex.InnerException is OracleException)
+                                                                {
+                                                                    Trace.TraceWarning($"Thread {guid} has exceeded time limit to push batch #{rnNumber} of the {currObject}" +
+                                                                        $"\nTrying to push the data once again with the double timeout");
+                                                                    bulkCopy.BulkCopyTimeout = pushTimeOut * 3;
+                                                                    bulkCopy.WriteToServer(dt);
+                                                                }
+                                                            }
+                                                            catch (OracleException oex)
+                                                            {
+                                                                Trace.TraceWarning($"Thread {guid} has exceeded time limit to push batch #{rnNumber} of the {currObject}" +
+                                                                    $"\nTrying to push the data once again with the double timeout");
+                                                                Trace.TraceWarning($"Exception was {oex.Message}");
+                                                                bulkCopy.BulkCopyTimeout = 180;
+                                                                bulkCopy.WriteToServer(dt);
+                                                            }
+                                                            catch (Exception ex)
+                                                            {
+                                                                if (ex.InnerException is OracleException)
+                                                                {
+                                                                    Trace.TraceWarning($"Thread {guid} has exceeded time limit to push batch #{rnNumber} of the {currObject}" +
+                                                                        $"\nTrying to push the data once again with the double timeout");
+                                                                    bulkCopy.BulkCopyTimeout = 180;
+                                                                    bulkCopy.WriteToServer(dt);
+                                                                }
+                                                                else
+                                                                {
+                                                                    Trace.TraceError($"Thread {guid} has caught an Oracle exception the batch#{rnNumber} of the {currObject} has been canceled");
+                                                                    Trace.TraceWarning($"Exception was {ex.Message}");
+                                                                }
+                                                            }
+                                                            finally
+                                                            {
+                                                                bulkCopy.Close();
+                                                            }
                                                         }
                                                     }
                                                     con.Close();
                                                 }
-                                            //});
+                                            });
                                         }
                                         else // Job is NOT complete
                                         {
@@ -1703,6 +1744,10 @@ namespace SalesForceAttachmentsBackupTools
         [Option("orclentryname", MetaValue = "EPAM_ORCL",
             HelpText = "Gives the name of the entry where the ORCL credentials must be looked for. Must contain DataSource description.")]
         public string ORCLEntryName { get; set; }
+
+        [Option("pushtimeout", MetaValue = "120",
+            HelpText ="Sets the initial timeout value for the packages to be pushed to the ORCL instance. Please, set it to a bigger value if you'll get too many warning in the log.")]
+        public int PushTimeout { get; set; }
     }
 
     enum SFObjectsWithAttachments
