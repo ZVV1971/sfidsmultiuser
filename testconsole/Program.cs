@@ -803,7 +803,7 @@ namespace SalesForceAttachmentsBackupTools
                         List<Task> idJobs = new List<Task>();
                         CancellationTokenSource source = new CancellationTokenSource();
                         //will throttle the number of simultaneously running push tasks
-                        SemaphoreSlim slim = new SemaphoreSlim(0, 3);
+                        Semaphore slim = new Semaphore(0, 3, "semaphore_" + guid.ToString("N"));
                         //For every batch (run)
                         do {
                             bool commaFlag = false;
@@ -961,7 +961,7 @@ namespace SalesForceAttachmentsBackupTools
                                             Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
                                             _ = Task.Run(async () =>
                                             {
-                                                slim.Wait();
+                                                slim.WaitOne();
                                                 using (OracleConnection con = new OracleConnection())
                                                 {
                                                     con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
@@ -974,13 +974,11 @@ namespace SalesForceAttachmentsBackupTools
                                                         DataTable dt = new DataTable();
                                                         dt.Load(dr);
                                                         using (OracleBulkCopy bulkCopy = new OracleBulkCopy(con)
-                                                        {
-                                                            DestinationTableName = $"{tableName}",
-                                                            //BatchSize = 50000,
-                                                            //BulkCopyOptions = OracleBulkCopyOptions.Default,
-                                                            BulkCopyTimeout = pushTimeOut,
-                                                            NotifyAfter = dt.Rows.Count
-                                                        })
+                                                            {
+                                                                DestinationTableName = $"{tableName}",
+                                                                BulkCopyTimeout = pushTimeOut,
+                                                                NotifyAfter = dt.Rows.Count
+                                                            })
                                                         {
                                                             //Create column mappings based on their indices
                                                             for (int i = 0; i < dt.Columns.Count; i++)
@@ -1007,7 +1005,6 @@ namespace SalesForceAttachmentsBackupTools
                                                                         Trace.TraceWarning($"Thread {guid} has exceeded time limit to push batch #{rnNumber} of the {currObject}" +
                                                                             $"\nTrying to push the data once again with the double timeout");
                                                                         bulkCopy.BulkCopyTimeout = pushTimeOut * 3;
-                                                                        bulkCopy.WriteToServer(dt);
                                                                     }
                                                                 }
                                                                 catch (OracleException oex)
@@ -1034,20 +1031,29 @@ namespace SalesForceAttachmentsBackupTools
                                                                         k = numberOfRetries + 1;
                                                                     }
                                                                 }
-                                                                finally
-                                                                {
-                                                                    bulkCopy.Close();
-                                                                }
                                                             } while (k < numberOfRetries);
-                                                        }
-                                                    }
+                                                            bulkCopy.Close();
+                                                        } //Of using bulkcopy
+
+                                                    }     //Of using CsvReader
+
                                                     con.Close();
-                                                }
-                                            });
+
+                                                }         //Of using Oracle connection
+                                            });           //Async lambda method
                                         }
                                         finally
                                         {
-                                            slim.Release();
+                                            try
+                                            {
+                                                slim.Release();
+                                            }
+                                            catch (Exception xpt)
+                                            {
+#if TRACE
+                                                Trace.TraceWarning($"Thread {guid} has caught an excpetion while releasing a lock: {xpt.Message}");
+#endif
+                                            }
                                         }
                                     }
                                     else // Job is NOT complete
