@@ -159,25 +159,6 @@ namespace SalesForceAttachmentsBackupTools
             credentialsDict = new Dictionary<string, ProtectedString>(OpenKeePassDB(
                     secString, pathToKeePassDb, groupName, entryName, useWindowsLogon));
             Trace.TraceInformation($"Got {credentialsDict.Count} credentials");
-            if (workingMode == WorkingModes.Subset)
-            {
-                foreach(KeyValuePair<string, ProtectedString> kv in OpenKeePassDB(
-                    secString, pathToKeePassDb, ORCLgroupName, ORCLentryName, useWindowsLogon))
-                {
-                    credentialsDict.Add("ORCL" + kv.Key, kv.Value);
-                }
-
-                if (credentialsDict.Where(t => t.Key.StartsWith("ORCL")).Count() < 3)
-                {
-                    Trace.TraceError("Not enough credentials to work in Subset mode. Oracle credentials weren't found in the KDBX.");
-                    WaitExitingCountdown(waittime);
-                    Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
-                }
-                else
-                {
-                    Trace.TraceInformation("Got 3 supplementary credentials to connect to an Oracle instance");
-                }
-            }
 
             //Check whether the number of credentials and their names are enough depending on the workmode
             switch (workingMode)
@@ -202,6 +183,23 @@ namespace SalesForceAttachmentsBackupTools
                     Trace.TraceInformation("Credentials and cryptographic stuff seem to be OK");
                     break;
                 case WorkingModes.Subset:
+                    foreach (KeyValuePair<string, ProtectedString> kv in OpenKeePassDB(
+                    secString, pathToKeePassDb, ORCLgroupName, ORCLentryName, useWindowsLogon))
+                    {
+                        credentialsDict.Add("ORCL" + kv.Key, kv.Value);
+                    }
+
+                    if (credentialsDict.Where(t => t.Key.StartsWith("ORCL")).Count() < 3)
+                    {
+                        Trace.TraceError("Not enough credentials to work in Subset mode. Oracle credentials weren't found in the KDBX.");
+                        WaitExitingCountdown(waittime);
+                        Environment.Exit((int)ExitCodes.CredentialsAbsenseError);
+                    }
+                    else
+                    {
+                        Trace.TraceInformation("Got 3 supplementary credentials to connect to an Oracle instance");
+                    }
+
                     if (credentialsDict.Where(t => t.Key == "UserName" || t.Key == "Password").Count() < 2)
                     {
                         Trace.TraceError("Either Password or UserName are absent in the given group/entity");
@@ -1027,7 +1025,7 @@ namespace SalesForceAttachmentsBackupTools
                                                                     else
                                                                     {
                                                                         Trace.TraceError($"Thread {guid} has caught an Oracle exception the batch #{rnNumber} of the {currObject} has been canceled");
-                                                                        Trace.TraceWarning($"Exception was {ex.Message}");
+                                                                        Trace.TraceWarning($"\nException was {ex.Message}");
                                                                         k = numberOfRetries + 1;
                                                                     }
                                                                 }
@@ -1051,7 +1049,7 @@ namespace SalesForceAttachmentsBackupTools
                                             catch (Exception xpt)
                                             {
 #if TRACE
-                                                Trace.TraceWarning($"Thread {guid} has caught an excpetion while releasing a lock: {xpt.Message}");
+                                                Trace.TraceWarning($"Thread {guid} has caught an exception while releasing a lock: {xpt.Message}");
 #endif
                                             }
                                         }
@@ -1137,7 +1135,7 @@ namespace SalesForceAttachmentsBackupTools
                                     cstream.Write(ms.ToArray(), 0, Convert.ToInt32(ms.Length));
                                     cstream.FlushFinalBlock();
                                     byte[] encrypted = stream.ToArray();
-                                    writer.WriteLine(listOfIds.ToList()[currentId] + "," + Convert.ToBase64String(encrypted));
+                                    writer.WriteLineAsync(listOfIds.ToList()[currentId] + "," + Convert.ToBase64String(encrypted));
                                 }
                             }
                         }
@@ -1709,7 +1707,7 @@ namespace SalesForceAttachmentsBackupTools
 
         [Option('d', "salesforcedomain",
             Default = "test", MetaValue = "test",
-            HelpText = "Represents a domain used to log into SalesForce from, e.g. https://test.salesforce.com")]
+            HelpText = "Sets a domain used to log into SalesForce, e.g. https://test.salesforce.com")]
         public string SalesForceDomain { get; set; }
 
         [Option('g', "groupname", Required = true, MetaValue = "EPAM",
@@ -1726,7 +1724,7 @@ namespace SalesForceAttachmentsBackupTools
         public string KDBXPath { get; set; }
 
         [Option('o', "sfobject", Default = SFObjectsWithAttachments.Document,
-            HelpText = "Points out which SalesForce object the body of attachments should be taken from",
+            HelpText = "Sets the SF object the body of attachments should be taken from",
             MetaValue = "Document")]
         public SFObjectsWithAttachments SFObject { get; set; }
 
@@ -1744,7 +1742,7 @@ namespace SalesForceAttachmentsBackupTools
         public string ComparisonResultsFilePath { get; set; }
 
         [Option('l', "logfile",
-            HelpText = "Sets the path to the logging file in additon to logging to the Console (if it's enabled by the next switch)",
+            HelpText = "Sets the path to log file in additon to logging to the Console (if it's enabled by the next switch)",
             MetaValue = "D:\\Att_bkp.log")]
         public string LogFilePath { get; set; }
 
@@ -1761,19 +1759,19 @@ namespace SalesForceAttachmentsBackupTools
         public string ReadModeFilter { get; set; }
 
         [Option('w', "winauth", Default = 0,
-            HelpText = "If this parameter is set to any value different from 0 then access to the KeePass file will be done using the current windows logon",
+            HelpText = "If this parameter is set to any value other than 0 then access to the KeePass file will be done using the current windows login",
             MetaValue = "0")]
         public int UseWindowsAccount { get; set; }
 
         [Option("excludeobjects", Default = null, MetaValue = "D:\\ObjectsToExclude.json",
             HelpText = "Sets path to the JSON file that must contain the array with object names to be excluded from the listing."
-            + "\nHere should be mentioned updateable objects that definitely do not contain sensitive information"
+            + "\nIt should list updateable objects that definitely do not contain sensitive information"
             + "\nImportant in subset mode. {\"ObjectsToExclude\":[\"Attachment\", \"Document\"]," +
             "\"FieldsToExclude:[{\"Account\":\"Jigsaw\"},{\"AnyObject\":\"Sic\"}]\"}")]
         public string PathToExcludeObjectsJson { get; set; }
 
         [Option("subsetpercentage", Default = 60, MetaValue = "50",
-            HelpText ="Sets percentage of the subset. If not set then no subsetting is done and the whole object is processed.")]
+            HelpText ="Sets percentage of the subset. If it's not set then no subsetting is done and the whole object is processed.")]
         public int SubsetPercentage { get; set; }
 
         [Option("subsetnumofrec", Default = int.MaxValue, MetaValue = "100000",
@@ -1790,7 +1788,7 @@ namespace SalesForceAttachmentsBackupTools
         public string ORCLEntryName { get; set; }
 
         [Option("pushtimeout", MetaValue = "120", Default = 120,
-            HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Please, set it to a bigger value if you'll get too many warning in the log.")]
+            HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Please, set it to a bigger value if you'll get too many warnings in the log.")]
         public int PushTimeout { get; set; }
 
         [Option("retries", MetaValue ="3", Default = 3,
