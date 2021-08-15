@@ -1,8 +1,14 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
+﻿using AsyncSalesForceAttachments;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using static AsyncSalesForceAttachments.PartialStreamWriter;
 
 namespace AsyncSalesForceAttachments.Tests
 {
@@ -142,6 +148,107 @@ namespace RepresentativeSubset.Tests
 
             Assert.IsTrue(res.Count() <= requiredCount, $"The count is {res.Count()}");
             Assert.IsTrue(res.Count() <= numberOfRecords * perc / 100);
+        }
+    }
+}
+
+namespace MultiPartStreamTests
+{
+    [TestClass]
+    public class MultiPartWriterTests
+    {
+        private TestContext testContextInstance;
+
+        [TestMethod]
+        public void checkNumberOfParts()
+        {
+            string testString = RndString.GetRandomString(5000);
+            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
+            int numberOfParts = 10;
+            using (PartialStreamWriter partialStream = new PartialStreamWriter(1, path, false, Encoding.ASCII))
+            {
+                for (int i = 0; i < numberOfParts; i++)
+                {
+                    partialStream.WriteLine(testString);
+                }
+            }
+
+            Assert.IsTrue(File.Exists(path));
+            for (int j = 0; j < numberOfParts -1; j++)
+            {
+                Assert.IsTrue(File.Exists(path + $".part{j++.ToString("D3")}"));
+            }
+        }
+
+        [TestMethod]
+        public void checkNumberOfPartsMultiThread()
+        {
+            string testString = RndString.GetRandomString(5000);
+            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
+            
+            int numberOfParts = 100;
+            int numberOfThreads = 13;
+            int numberOfLines = 5;
+            SynchronizedIds counter = new SynchronizedIds();
+            List<Task> taskList = new List<Task>(numberOfThreads);
+
+            using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
+            {
+                for (int k = 0; k < numberOfThreads; k++)
+                {
+                    taskList.Add(Task.Run(() =>
+                    {
+                        while (counter.GetCurrentID() < numberOfParts)
+                        {
+                            partialStream.WriteLine(testString);
+                        }
+                    }));
+                }
+                Task.WaitAll(taskList.ToArray());
+            }
+
+            Assert.IsTrue(File.Exists(path));
+            for (int j = 0; j < numberOfParts/numberOfLines - 1; j++)
+            {
+                Assert.IsTrue(File.Exists(path + $".part{j.ToString("D3")}"));
+            }
+        }
+
+        [TestMethod]
+        public void checkEvenrIsRaised()
+        {
+            string testString = RndString.GetRandomString(5000);
+            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
+
+            int numberOfParts = 100;
+            int numberOfThreads = 13;
+            int numberOfLines = 5;
+            SynchronizedIds counter = new SynchronizedIds();
+            List<Task> taskList = new List<Task>(numberOfThreads);
+            List<string> eventList = new List<string>();
+
+            using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
+            {
+                partialStream.NewPartStarted += delegate (object sender, NewPartStartedEventArgs e)
+                {
+                    Console.WriteLine($"New part has been started {e.newPartPath}");
+                    eventList.Add(e.newPartPath);
+                };
+
+                for (int k = 0; k < numberOfThreads; k++)
+                {
+                    taskList.Add(Task.Run(() =>
+                    {
+                        while (counter.GetCurrentID() < numberOfParts)
+                        {
+                            partialStream.WriteLine(testString);
+                        }
+                    }));
+                }
+                Task.WaitAll(taskList.ToArray());
+            }
+
+            Assert.AreEqual((int)(numberOfParts / numberOfLines) - 1, eventList.Count, $"Actual count is {eventList.Count} expected {(int)(numberOfParts / numberOfParts) - 1}");
         }
     }
 }

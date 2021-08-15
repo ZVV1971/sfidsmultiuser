@@ -1681,7 +1681,13 @@ namespace SalesForceAttachmentsBackupTools
         {
             Random random = new Random(DateTime.UtcNow.Millisecond);
             const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            return new string(Enumerable.Repeat(chars, len).Select(s => s[random.Next(s.Length)]).ToArray());
+            return new string(Enumerable
+                //Repeats the source string LEN time
+                .Repeat(chars, len)
+                //Selects from each source string only one random char
+                .Select(s => s[random.Next(s.Length)])
+                //Converts it to array from which the new string is constructed
+                .ToArray());
         }
 
         private static void OnRowsCopied(object sender, OracleRowsCopiedEventArgs e)
