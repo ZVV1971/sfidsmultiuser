@@ -1629,6 +1629,8 @@ namespace SalesForceAttachmentsBackupTools
         private static async Task<HttpResponseMessage> ReadFromSalesForce(Uri requestUri, 
             IDictionary<string,string> dic, HttpMethod method, string content = null, string accepts = "application/json")
         {
+            int retries = 1;
+
             HttpResponseMessage response = new HttpResponseMessage();
             HttpRequestMessage msg = new HttpRequestMessage
             {
@@ -1647,7 +1649,10 @@ namespace SalesForceAttachmentsBackupTools
 
             try
             {
-                response = await client.SendAsync(msg, HttpCompletionOption.ResponseContentRead);
+                do
+                {
+                    response = await client.SendAsync(msg, HttpCompletionOption.ResponseContentRead);
+                } while (response?.Content == null || retries++ < numberOfRetries);
             }
             catch (Exception ex)
             {
