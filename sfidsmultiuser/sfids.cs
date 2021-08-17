@@ -77,6 +77,16 @@ namespace AsyncSalesForceAttachments
         private readonly Queue<T> queue = new Queue<T>();
         private readonly int minSize;
         private bool closing;
+
+        /// <summary>
+        /// Initializes a new instance of MinSizeQueue with default number of slots = 10
+        /// </summary>
+        public MinSizeQueue() : this(10) { }
+        
+        /// <summary>
+        /// Initializes a new instance of the MinSizeQueue with the <paramref name="minSize"/> number of slots
+        /// </summary>
+        /// <param name="minSize">The parameter indicating then the queue should wake up any blocked enqueers </param>
         public MinSizeQueue(int minSize)
         {
             this.minSize = minSize;
@@ -127,8 +137,8 @@ namespace AsyncSalesForceAttachments
                     }
                     Monitor.Wait(queue);
                 }
-                value = queue.Dequeue();
                 OnDequeued();
+                value = queue.Dequeue();
                 if (queue.Count <= minSize)
                 {
                     // wake up any blocked enqueuers
@@ -475,7 +485,7 @@ namespace RepresentativeSubset
         /// </summary>
         /// <param name="OriginalSubset"></param>
         /// <returns></returns>
-        public static IEnumerable<T> Quarter(IEnumerable<T> OriginalSubset, double ratio = 1 / 2)
+        public static IEnumerable<T> Quarter(IEnumerable<T> OriginalSubset, double ratio = (double)1 / 2)
         {
             List<T> lt = OriginalSubset.ToList<T>();
             T[] res = new T[(int)(lt.Count * ratio)];
