@@ -264,26 +264,17 @@ namespace MinSizeQueueTests
         string path;
         string testString;
         int numberOfRows;
+        int numberOfThreads;
         MinSizeQueue<string> minSizeQueue;
 
         [TestInitialize]
         public void InitializeFiles()
         {
             path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup_syncho.csv";
-            testString = RndString.GetRandomString(50);
-            numberOfRows = 11;
+            testString = RndString.GetRandomString(4000);
+            numberOfRows = 10000;
             minSizeQueue = new MinSizeQueue<string>(1);
-        }
-
-        [TestMethod]
-        public void CheckEventsGenerated()
-        {
-            MinSizeQueue<string> minSizeQueue = new MinSizeQueue<string>();
-            List<string> eventList = new List<string>();
-            minSizeQueue.Dequeued += delegate (object sender, DequeueEventArgs e) 
-            {
-                eventList.Add(e.numberInQueue.ToString());
-            };
+            numberOfThreads = 10;
 
             using (StreamWriter stream = new StreamWriter(path, false, Encoding.ASCII))
             {
@@ -292,8 +283,24 @@ namespace MinSizeQueueTests
                     stream.WriteLine(testString);
                 }
             }
+        }
 
-            Task.Factory.StartNew(() =>
+        [TestMethod]
+        public void CheckEventsGenerated()
+        {
+            MinSizeQueue<string> minSizeQueue = new MinSizeQueue<string>(numberOfThreads);
+            List<string> eventList = new List<string>();
+            minSizeQueue.Dequeued += delegate (object sender, QueueEventArgs e) 
+            {
+                Console.WriteLine(e.numberInQueue);
+                eventList.Add(e.numberInQueue.ToString());
+            };
+            minSizeQueue.Enqueued += delegate (object sender, QueueEventArgs e)
+            {
+                Console.WriteLine($"Enqueued {e.numberInQueue}");
+            };
+
+            Task enq = Task.Factory.StartNew(() =>
             {
                 using (StreamReader stream = new StreamReader(path, Encoding.ASCII, false, 100000))
                 {
@@ -311,24 +318,30 @@ namespace MinSizeQueueTests
                 }
             });
 
-            //Create dequeuer
-            //Task.Factory.StartNew(()=> 
-            //{
-            string value;
-                while (true) 
+            //Create dequeuers
+            List<Task> tasks = new List<Task>();
+            for (int i = 0; i < numberOfThreads; i++) 
+            {
+                tasks.Add(Task.Factory.StartNew(() =>
                 {
-                    if (minSizeQueue.TryDequeue(out value))
+                    string value;
+                    while (true)
                     {
-                        Console.WriteLine(value);
+                        if (minSizeQueue.TryDequeue(out value))
+                        {
+                        //Console.WriteLine(value);
                     }
-                    else
-                    {
-                        minSizeQueue.Close();
-                        break;
+                        else
+                        {
+                            minSizeQueue.Close();
+                            break;
+                        }
                     }
-                }
-            //});
+                })); 
+            }
 
+            tasks.Add(enq);
+            Task.WaitAll(tasks.ToArray<Task>());
             Assert.AreEqual(eventList.Count, numberOfRows);
         }
     }

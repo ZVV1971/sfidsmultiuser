@@ -72,7 +72,7 @@ namespace AsyncSalesForceAttachments
     //https://stackoverflow.com/questions/530211/creating-a-blocking-queuet-in-net
     public class MinSizeQueue<T>
     {
-        public delegate void DequeuedEventHandler(object sender, DequeueEventArgs e);
+        public delegate void QueuedEventHandler(object sender, QueueEventArgs e);
 
         private readonly Queue<T> queue = new Queue<T>();
         private readonly int minSize;
@@ -92,23 +92,31 @@ namespace AsyncSalesForceAttachments
             this.minSize = minSize;
         }
 
-        public event DequeuedEventHandler Dequeued;
+        public event QueuedEventHandler Dequeued;
         protected virtual void OnDequeued()
         {
-            Dequeued?.Invoke(this, new DequeueEventArgs(queue.Count));
+            Dequeued?.Invoke(this, new QueueEventArgs(queue.Count, true));
+        }
+
+        public event QueuedEventHandler Enqueued;
+
+        protected virtual void OnEnqueued()
+        {
+            Enqueued?.Invoke(this, new QueueEventArgs(queue.Count, false));
         }
 
         public void Enqueue(T item)
         {
             lock (queue)
             {
-                while (queue.Count >= minSize)
+                while (queue.Count > minSize)
                 {
                     Monitor.Wait(queue);
                 }
                 queue.Enqueue(item);
+                OnEnqueued();
 
-                if (closing || queue.Count > minSize)
+                if (closing || queue.Count >= minSize)
                 {
                     //wake up any blocked dequeuers
                     Monitor.PulseAll(queue);
@@ -121,7 +129,7 @@ namespace AsyncSalesForceAttachments
             lock (queue)
             {
                 closing = true;
-                Monitor.Pulse(queue);
+                Monitor.PulseAll(queue);
             }
         }
         public bool TryDequeue(out T value)
@@ -137,8 +145,8 @@ namespace AsyncSalesForceAttachments
                     }
                     Monitor.Wait(queue);
                 }
-                OnDequeued();
                 value = queue.Dequeue();
+                OnDequeued();
                 if (queue.Count <= minSize)
                 {
                     // wake up any blocked enqueuers
@@ -148,15 +156,20 @@ namespace AsyncSalesForceAttachments
             }
         }
     }
-
-    public class DequeueEventArgs : EventArgs
+    /// <summary>
+    /// Holds the current numberInQueue (after the operation Enqueue / Dequeue has been done)
+    /// Dequeued the direction of the operation; true - dequeuing; false - enqueuing
+    /// </summary>
+    public class QueueEventArgs : EventArgs
     {
-        public DequeueEventArgs(int num)
+        public QueueEventArgs(int num, Boolean dequeued)
         {
             numberInQueue = num;
+            this.dequeued = dequeued;
         }
 
-        public int numberInQueue{ get; }
+        public int numberInQueue { get; }
+        public bool dequeued { get; }
     }
 
     public class RndString
