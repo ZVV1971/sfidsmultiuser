@@ -1,13 +1,14 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.IO;
 using System.IO.MemoryMappedFiles;
+using System.Linq;
 using System.Security;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
-using System.Security.Cryptography;
-using System.Linq;
-using System.ComponentModel.DataAnnotations;
-using System.Collections;
 
 namespace AsyncSalesForceAttachments
 {
@@ -71,15 +72,27 @@ namespace AsyncSalesForceAttachments
     //https://stackoverflow.com/questions/530211/creating-a-blocking-queuet-in-net
     public class MinSizeQueue<T>
     {
+        public delegate void DequeuedEventHandler(object sender, DequeueEventArgs e);
+
         private readonly Queue<T> queue = new Queue<T>();
         private readonly int minSize;
         private bool closing;
+
+        /// <summary>
+        /// Initializes a new instance of MinSizeQueue with default number of slots = 10
+        /// </summary>
+        public MinSizeQueue() : this(10) { }
+        
+        /// <summary>
+        /// Initializes a new instance of the MinSizeQueue with the <paramref name="minSize"/> number of slots
+        /// </summary>
+        /// <param name="minSize">The parameter indicating then the queue should wake up any blocked enqueers </param>
         public MinSizeQueue(int minSize)
         {
             this.minSize = minSize;
         }
 
-        public event EventHandler Dequeued;
+        public event DequeuedEventHandler Dequeued;
         protected virtual void OnDequeued()
         {
             Dequeued?.Invoke(this, new DequeueEventArgs(queue.Count));
@@ -124,6 +137,7 @@ namespace AsyncSalesForceAttachments
                     }
                     Monitor.Wait(queue);
                 }
+                OnDequeued();
                 value = queue.Dequeue();
                 if (queue.Count <= minSize)
                 {
@@ -142,7 +156,7 @@ namespace AsyncSalesForceAttachments
             numberInQueue = num;
         }
 
-        public int numberInQueue{ get; set; }
+        public int numberInQueue{ get; }
     }
 
     public class RndString
@@ -300,6 +314,87 @@ namespace AsyncSalesForceAttachments
         }
         #endregion
     }
+    
+    public class PartialStreamWriter : MarshalByRefObject, IDisposable
+    {
+        private int _maxRows;
+        private string _path;
+        private string _currentPath;
+        private TextWriter _streamWriter;
+        private int _counter;
+        private int _currentPart;
+        private bool _append;
+        private Encoding _encoding;
+        private bool disposedValue;
+        private readonly string mutexName = "MutithreadingMultipartWriteStream_Mutex";
+        private Mutex mutex;
+
+        public PartialStreamWriter(int MaxRows, string path, bool append, Encoding encoding)
+        {
+            if (MaxRows <= 0) throw new ArgumentOutOfRangeException("MaxRows", "MaxRows must be positive integer greater than 0");
+            this.mutex = new Mutex(false, mutexName);
+            this._maxRows = MaxRows;
+            this._counter = 0;
+            this._currentPart = 0;
+            this._path = path;
+            this._currentPath = path;
+            this._append = append;
+            this._encoding = encoding;
+            this._streamWriter = TextWriter.Synchronized(new StreamWriter(path, append, encoding));
+        }
+
+        public virtual void WriteLine(string value)
+        {
+            mutex.WaitOne();
+            if (_counter >= _maxRows)
+            {
+                _streamWriter.Flush();
+                _currentPath = _path + $".part{_currentPart++.ToString("D3")}";
+                OnNewPartStarted();
+                _streamWriter = TextWriter.Synchronized(new StreamWriter(_currentPath, _append, _encoding));
+                _counter = 0;
+            }
+            _streamWriter.WriteLine(value);
+            _counter++;
+            mutex.ReleaseMutex();
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!disposedValue)
+            {
+                if (disposing)
+                {
+                    _streamWriter.Dispose();
+                }
+                disposedValue = true;
+            }
+        }
+        public void Dispose()
+        {
+            Dispose(disposing: true);
+            GC.SuppressFinalize(this);
+        }
+
+        public delegate void NewPartEventHandler(object sender, NewPartStartedEventArgs e);
+
+        public event NewPartEventHandler NewPartStarted;
+        
+        protected virtual void OnNewPartStarted()
+        {
+            NewPartStarted?.Invoke(this, new NewPartStartedEventArgs(_currentPath));
+        }
+    }
+
+    public class NewPartStartedEventArgs : EventArgs
+    {
+        public NewPartStartedEventArgs(string newPartPath)
+        {
+            this.newPartPath = newPartPath;
+        }
+
+        public string newPartPath { get; }
+    }
 }
 
 namespace RepresentativeSubset
@@ -390,7 +485,7 @@ namespace RepresentativeSubset
         /// </summary>
         /// <param name="OriginalSubset"></param>
         /// <returns></returns>
-        public static IEnumerable<T> Quarter(IEnumerable<T> OriginalSubset, double ratio = 1 / 2)
+        public static IEnumerable<T> Quarter(IEnumerable<T> OriginalSubset, double ratio = (double)1 / 2)
         {
             List<T> lt = OriginalSubset.ToList<T>();
             T[] res = new T[(int)(lt.Count * ratio)];

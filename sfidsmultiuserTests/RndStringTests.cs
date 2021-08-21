@@ -1,8 +1,14 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
+﻿using AsyncSalesForceAttachments;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using static AsyncSalesForceAttachments.PartialStreamWriter;
 
 namespace AsyncSalesForceAttachments.Tests
 {
@@ -23,6 +29,11 @@ namespace AsyncSalesForceAttachments.Tests
             Random r = new Random(121);
             int i = r.Next(10, 100);
             Assert.AreNotEqual(RndString.GetRandomString(i), RndString.GetRandomString(i));
+        }
+
+        public void GetCurrentIDTest()
+        {
+
         }
     }
 }
@@ -70,7 +81,7 @@ namespace RepresentativeSubset.Tests
             IEnumerable<int> i = new int[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
             IEnumerable<int> ot = SubsetHelper<int>.Quarter(i);
 
-            Assert.AreEqual(i.ToList().Count / 2, ot.ToList().Count);
+            Assert.AreEqual(i.ToList().Count / 2, ot.ToList().Count, $"{i.ToArray().Length} - {ot.ToArray().Length}");
 
         }
 
@@ -142,6 +153,183 @@ namespace RepresentativeSubset.Tests
 
             Assert.IsTrue(res.Count() <= requiredCount, $"The count is {res.Count()}");
             Assert.IsTrue(res.Count() <= numberOfRecords * perc / 100);
+        }
+    }
+}
+
+namespace MultiPartStreamTests
+{
+    [TestClass]
+    public class MultiPartWriterTests
+    {
+        [TestMethod]
+        public void checkNumberOfParts()
+        {
+            string testString = RndString.GetRandomString(5000);
+            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
+            int numberOfParts = 10;
+            using (PartialStreamWriter partialStream = new PartialStreamWriter(1, path, false, Encoding.ASCII))
+            {
+                for (int i = 0; i < numberOfParts; i++)
+                {
+                    partialStream.WriteLine(testString);
+                }
+            }
+
+            Assert.IsTrue(File.Exists(path));
+            for (int j = 0; j < numberOfParts -1; j++)
+            {
+                Assert.IsTrue(File.Exists(path + $".part{j++.ToString("D3")}"));
+            }
+        }
+
+        [TestMethod]
+        public void checkNumberOfPartsMultiThread()
+        {
+            string testString = RndString.GetRandomString(5000);
+            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
+            
+            int numberOfParts = 100;
+            int numberOfThreads = 13;
+            int numberOfLines = 5;
+            SynchronizedIds counter = new SynchronizedIds();
+            List<Task> taskList = new List<Task>(numberOfThreads);
+
+            using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
+            {
+                for (int k = 0; k < numberOfThreads; k++)
+                {
+                    taskList.Add(Task.Run(() =>
+                    {
+                        while (counter.GetCurrentID() < numberOfParts)
+                        {
+                            partialStream.WriteLine(testString);
+                        }
+                    }));
+                }
+                Task.WaitAll(taskList.ToArray());
+            }
+
+            Assert.IsTrue(File.Exists(path));
+            for (int j = 0; j < numberOfParts/numberOfLines - 1; j++)
+            {
+                Assert.IsTrue(File.Exists(path + $".part{j.ToString("D3")}"));
+            }
+        }
+
+        [TestMethod]
+        public void checkEvenrIsRaised()
+        {
+            string testString = RndString.GetRandomString(5000);
+            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
+
+            int numberOfParts = 100;
+            int numberOfThreads = 13;
+            int numberOfLines = 5;
+            SynchronizedIds counter = new SynchronizedIds();
+            List<Task> taskList = new List<Task>(numberOfThreads);
+            List<string> eventList = new List<string>();
+
+            using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
+            {
+                partialStream.NewPartStarted += delegate (object sender, NewPartStartedEventArgs e)
+                {
+                    Console.WriteLine($"New part has been started {e.newPartPath}");
+                    eventList.Add(e.newPartPath);
+                };
+
+                for (int k = 0; k < numberOfThreads; k++)
+                {
+                    taskList.Add(Task.Run(() =>
+                    {
+                        while (counter.GetCurrentID() < numberOfParts)
+                        {
+                            partialStream.WriteLine(testString);
+                        }
+                    }));
+                }
+                Task.WaitAll(taskList.ToArray());
+            }
+
+            Assert.AreEqual((int)(numberOfParts / numberOfLines) - 1, eventList.Count, $"Actual count is {eventList.Count} expected {(int)(numberOfParts / numberOfParts) - 1}");
+        }
+    }
+}
+
+namespace MinSizeQueueTests
+{
+    [TestClass]
+    public class MinSizeQueueTestsClass
+    {
+        string path;
+        string testString;
+        int numberOfRows;
+        MinSizeQueue<string> minSizeQueue;
+
+        [TestInitialize]
+        public void InitializeFiles()
+        {
+            path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup_syncho.csv";
+            testString = RndString.GetRandomString(50);
+            numberOfRows = 11;
+            minSizeQueue = new MinSizeQueue<string>(1);
+        }
+
+        [TestMethod]
+        public void CheckEventsGenerated()
+        {
+            MinSizeQueue<string> minSizeQueue = new MinSizeQueue<string>();
+            List<string> eventList = new List<string>();
+            minSizeQueue.Dequeued += delegate (object sender, DequeueEventArgs e) 
+            {
+                eventList.Add(e.numberInQueue.ToString());
+            };
+
+            using (StreamWriter stream = new StreamWriter(path, false, Encoding.ASCII))
+            {
+                for (int i = 0; i < numberOfRows; i++)
+                {
+                    stream.WriteLine(testString);
+                }
+            }
+
+            Task.Factory.StartNew(() =>
+            {
+                using (StreamReader stream = new StreamReader(path, Encoding.ASCII, false, 100000))
+                {
+                    string line;
+                    while (true)
+                    {
+                        line = stream.ReadLine();
+                        if (line == null)
+                        {
+                            minSizeQueue.Close();
+                            break;
+                        }
+                        minSizeQueue.Enqueue(line);
+                    }
+                }
+            });
+
+            //Create dequeuer
+            //Task.Factory.StartNew(()=> 
+            //{
+            string value;
+                while (true) 
+                {
+                    if (minSizeQueue.TryDequeue(out value))
+                    {
+                        Console.WriteLine(value);
+                    }
+                    else
+                    {
+                        minSizeQueue.Close();
+                        break;
+                    }
+                }
+            //});
+
+            Assert.AreEqual(eventList.Count, numberOfRows);
         }
     }
 }

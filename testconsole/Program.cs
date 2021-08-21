@@ -49,7 +49,8 @@ namespace SalesForceAttachmentsBackupTools
         private static string filter;
         private static string pathToJSONfile;
         private static string prefix;
-        private static int numberOfThreads;
+        private static int numberOfRows;                            //Sets the number of rows one part of the back-up file could contain
+        private static int numberOfThreads;                         //Sets the number of workers simultaneously executing the Job
         private static int numberOfRetries = 3;                     //Hardcoded number of retries for push
         private static int pushTimeOut;                             //Initial timeout for the bulk packages pushed to the ORACLE instance
         private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
@@ -112,7 +113,18 @@ namespace SalesForceAttachmentsBackupTools
                         pathToComparisonResults = opt.ComparisonResultsFilePath;
                         if (workingMode == WorkingModes.Read)
                         {
-                            filter = HttpUtility.UrlEncode(" WHERE " + opt.ReadModeFilter, Encoding.ASCII);
+                            if (opt.MaxRowsInAPart <=0)
+                            {
+                                numberOfRows = int.MaxValue;
+                            }
+                            else
+                            {
+                                numberOfRows = opt.MaxRowsInAPart;
+                            }
+                            if (!string.IsNullOrEmpty(opt.ReadModeFilter))
+                            {
+                                filter = HttpUtility.UrlEncode(" WHERE " + opt.ReadModeFilter, Encoding.ASCII);
+                            }
                         }
                         if (workingMode == WorkingModes.Subset)
                         {
@@ -292,13 +304,18 @@ namespace SalesForceAttachmentsBackupTools
             switch (workingMode)
             {
                 case WorkingModes.Read:
-                    using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(resultFileName, false, Encoding.ASCII)))
+                    using (PartialStreamWriter resultStream = new PartialStreamWriter(numberOfRows, resultFileName, false, Encoding.ASCII))
                     {
+                        resultStream.NewPartStarted += delegate (object sender, NewPartStartedEventArgs e)
+                        {
+                            Trace.TraceInformation($"New part has been started {e.newPartPath}");
+                        };
                         Trace.TraceInformation($"Initiating {numberOfThreads} workers to read data.");
                         for (int i = 0; i < numberOfThreads; i++)
                         {
                             tasks.Add(Task.Run(
-                                () => doWork(listOfIds.ToList(), salesForceSID, objectWithAttachments, cipher.CreateEncryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV), resultStream)));
+                                () => doWork(listOfIds.ToList(), salesForceSID, objectWithAttachments, 
+                                    cipher.CreateEncryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV), resultStream)));
                         }
                         Task.WaitAll(tasks.ToArray());
                     }
@@ -1099,7 +1116,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="cryptoTrans">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="writer">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, TextWriter writer)
+        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, PartialStreamWriter writer)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId;
@@ -1135,7 +1152,7 @@ namespace SalesForceAttachmentsBackupTools
                                     cstream.Write(ms.ToArray(), 0, Convert.ToInt32(ms.Length));
                                     cstream.FlushFinalBlock();
                                     byte[] encrypted = stream.ToArray();
-                                    writer.WriteLineAsync(listOfIds.ToList()[currentId] + "," + Convert.ToBase64String(encrypted));
+                                    writer.WriteLine(listOfIds.ToList()[currentId] + "," + Convert.ToBase64String(encrypted));
                                 }
                             }
                         }
@@ -1686,7 +1703,13 @@ namespace SalesForceAttachmentsBackupTools
         {
             Random random = new Random(DateTime.UtcNow.Millisecond);
             const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-            return new string(Enumerable.Repeat(chars, len).Select(s => s[random.Next(s.Length)]).ToArray());
+            return new string(Enumerable
+                //Repeats the source string LEN time
+                .Repeat(chars, len)
+                //Selects from each source string only one random char
+                .Select(s => s[random.Next(s.Length)])
+                //Converts it to array from which the new string is constructed
+                .ToArray());
         }
 
         private static void OnRowsCopied(object sender, OracleRowsCopiedEventArgs e)
@@ -1799,6 +1822,10 @@ namespace SalesForceAttachmentsBackupTools
         [Option("retries", MetaValue ="3", Default = 3,
             HelpText = "Sets the number of retries for push of the data batches; 1 - 10")]
         public int RetriesNumber { get; set; }
+        
+        [Option("maxrows", MetaValue ="1000", Default = int.MaxValue,
+            HelpText ="Sets the maximal number of rows that one part of the back-up file could contain (>=1)")]
+        public int MaxRowsInAPart { get; set; }
     }
 
     enum SFObjectsWithAttachments
