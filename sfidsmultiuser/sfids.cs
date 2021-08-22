@@ -362,7 +362,7 @@ namespace AsyncSalesForceAttachments
             if (_counter >= _maxRows)
             {
                 _streamWriter.Flush();
-                _currentPath = _path + $".part{_currentPart++.ToString("D3")}";
+                _currentPath = _path + $".part{_currentPart++.ToString("D4")}";
                 OnNewPartStarted();
                 _streamWriter = TextWriter.Synchronized(new StreamWriter(_currentPath, _append, _encoding));
                 _counter = 0;
@@ -505,11 +505,7 @@ namespace RepresentativeSubset
             res[0] = lt[0];
             for (int i = 1; i < lt.Count * ratio; i++)
             {
-                try { res[i] = lt[(int)(i / ratio - 1)]; }
-                catch (Exception ex)
-                {
-                    ;
-                }
+                res[i] = lt[(int)(i / ratio - 1)];
             }
             return res;
         }

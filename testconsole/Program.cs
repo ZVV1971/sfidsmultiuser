@@ -31,6 +31,7 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using System.Globalization;
 using System.Data;
+using System.Reflection;
 
 namespace SalesForceAttachmentsBackupTools
 {
@@ -163,6 +164,18 @@ namespace SalesForceAttachmentsBackupTools
                     return 0;
                 });
 
+            Assembly execAssembly = Assembly.GetExecutingAssembly();
+
+            AssemblyName name = execAssembly.GetName();
+
+            Trace.TraceInformation(string.Format("{0} {1:0}.{2:0}.{3:0}.{4:0}",
+                "current version",
+                name.Version.Major.ToString(),
+                name.Version.Minor.ToString(),
+                name.Version.Build.ToString(),
+                name.Version.Revision.ToString()
+                ));
+
             //Open KeePass (needed for every operation) and store credentials in the dictionary
             //This is done with regard that the KDBX file could be protected by Windows credentials
             //starting from some new versions as well.
@@ -273,14 +286,15 @@ namespace SalesForceAttachmentsBackupTools
                             con.Open();
                             OracleCommand cmd = new OracleCommand("SELECT 1 FROM DUAL", con);
                             cmd.ExecuteScalar();
-                            //The Orcle command executed OK therefore the Connection String could be passed as a Protected string in a dictionary
+
+                            //The Oracle command executed OK therefore the Connection String could be passed as a Protected string in a dictionary
                             credentialsDict.Add("ORCLConnectionString", 
                                 new ProtectedString(true, $"User ID={credentialsDict["ORCLUserName"].ReadString()}; " +
                                 $"Password={credentialsDict["ORCLPassword"].ReadString()}; " +
                                 $"Data Source={credentialsDict["ORCLDataSource"].ReadString()};"));
                             Trace.TraceInformation("Target DB connection OK");
                         }
-                        catch (Exception ex)
+                        catch
                         {
                             Trace.TraceError($"Error opening ORACLE connection. Exiting...");
                             WaitExitingCountdown(waittime);
@@ -322,29 +336,70 @@ namespace SalesForceAttachmentsBackupTools
                     break;
                 case WorkingModes.Write:
                     minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
-                    _ = FillQueue(resultFileName);
-                    Trace.TraceInformation($"Initiating {numberOfThreads} workers to write data.");
-                    for (int i = 0; i < numberOfThreads; i++)
+                    
+                    //A block just to make the variables local
                     {
-                        tasks.Add(Task.Run(
-                            () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV))));
+                        Queue<string> backupFiles = new Queue<string>(new string[] { resultFileName });
+
+                        Directory.GetFiles(Path.GetDirectoryName(resultFileName), Path.GetFileName(resultFileName) + ".part????")
+                            .ToList<string>().ForEach(t =>
+                            {
+                                backupFiles.Enqueue(t);
+                                Trace.TraceInformation($"A part {t} has been found. Adding to the queue");
+                            }
+                            );
+                        string currentBackupFile;
+                        while (backupFiles.Count > 0)
+                        {
+                            currentBackupFile = backupFiles.Dequeue();
+                            Trace.TraceInformation($"Starting to process {currentBackupFile}");
+                            _ = FillQueue(currentBackupFile);
+                            Trace.TraceInformation($"Initiating {numberOfThreads} workers to write data.");
+                            for (int i = 0; i < numberOfThreads; i++)
+                            {
+                                tasks.Add(Task.Run(
+                                    () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, 
+                                        cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV))));
+                            }
+                            Task.WaitAll(tasks.ToArray());
+                        }
                     }
-                    Task.WaitAll(tasks.ToArray());
                     break;
                 case WorkingModes.Compare:
                     minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
-                    _ = FillQueue(resultFileName);
-                    using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(pathToComparisonResults, false, Encoding.ASCII)))
+                    
+                    //A block just to make variables local
                     {
-                        Trace.TraceInformation($"Initiating {numberOfThreads} workers to compare data.");
-                        for (int i = 0; i < numberOfThreads; i++)
+                        Queue<string> backupFiles = new Queue<string>(new string[] { resultFileName });
+
+                        Directory.GetFiles(Path.GetDirectoryName(resultFileName), Path.GetFileName(resultFileName) + ".part????")
+                            .ToList<string>().ForEach(t => 
+                                {
+                                    backupFiles.Enqueue(t);
+                                    Trace.TraceInformation($"A part {t} has been found. Adding to the queue");
+                                }
+                            );
+                        string currentBackupFile;
+                        bool append = false;
+                        while (backupFiles.Count > 0)
                         {
-                            tasks.Add(Task.Run(
-                                () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, 
-                                    cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()),
-                                    cipher.IV), resultStream)));
+                            currentBackupFile = backupFiles.Dequeue();
+                            Trace.TraceInformation($"Starting to process {currentBackupFile}");
+                            _ = FillQueue(currentBackupFile);
+                            using (TextWriter resultStream = TextWriter.Synchronized(new StreamWriter(pathToComparisonResults, append, Encoding.ASCII)))
+                            {
+                                Trace.TraceInformation($"Initiating {numberOfThreads} workers to compare data.");
+                                for (int i = 0; i < numberOfThreads; i++)
+                                {
+                                    tasks.Add(Task.Run(
+                                        () => doWork(minSizeQueue, salesForceSID, objectWithAttachments,
+                                            cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()),
+                                            cipher.IV), resultStream)));
+                                }
+                                Task.WaitAll(tasks.ToArray());
+                            }
+                            append = true;
                         }
-                        Task.WaitAll(tasks.ToArray());
                     }
                     break;
                 case WorkingModes.Subset:
@@ -434,7 +489,7 @@ namespace SalesForceAttachmentsBackupTools
                     data = JObject.Parse(File.ReadAllText(path));
                     excludeArray = excludeArray.Concat(JArray.Parse(data["ObjectsToExclude"].ToString()).Intersect(arr).ToList());
                 }
-                catch (Exception ex) 
+                catch
                 {
                     Trace.TraceWarning("Wrong path to the JSON file is given!");
                 }
@@ -1407,7 +1462,7 @@ namespace SalesForceAttachmentsBackupTools
                     if (!grp.GetEntries(false).Any(x => x.Strings.ReadSafe("Title").Equals(entryName)))
                     {
                         //Need to have a local variable for Protected dic
-                        //otherwise the clause becomes too complecated for reading
+                        //otherwise the clause becomes too complicated for reading
                         ProtectedStringDictionary d = new ProtectedStringDictionary();
                         d.Set("Title", new ProtectedString(true, entryName));
 #pragma warning disable CS0618 // Type or member is obsolete
@@ -1669,7 +1724,8 @@ namespace SalesForceAttachmentsBackupTools
                 do
                 {
                     response = await client.SendAsync(msg, HttpCompletionOption.ResponseContentRead);
-                } while (response?.Content == null || retries++ < numberOfRetries);
+                } 
+                while (response?.Content == null && retries++ < numberOfRetries);
             }
             catch (Exception ex)
             {

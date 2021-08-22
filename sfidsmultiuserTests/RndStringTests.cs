@@ -162,13 +162,27 @@ namespace MultiPartStreamTests
     [TestClass]
     public class MultiPartWriterTests
     {
-        [TestMethod]
+        string path;
+        string testString;
+        int numberOfParts;
+        int numberOfLines;
+        int numberOfThreads;
+
+
+        [TestInitialize]
+        public void Initialize()
+        {
+            path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
+            testString = RndString.GetRandomString(500);
+            numberOfParts = 40000;
+            numberOfLines = 5000;
+            numberOfThreads = 8;
+        }
+
+        [TestMethod("Checks whether the number of files is equal to the number of parts created by the method")]
         public void checkNumberOfParts()
         {
-            string testString = RndString.GetRandomString(5000);
-            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
-            int numberOfParts = 10;
-            using (PartialStreamWriter partialStream = new PartialStreamWriter(1, path, false, Encoding.ASCII))
+            using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
             {
                 for (int i = 0; i < numberOfParts; i++)
                 {
@@ -177,21 +191,15 @@ namespace MultiPartStreamTests
             }
 
             Assert.IsTrue(File.Exists(path));
-            for (int j = 0; j < numberOfParts -1; j++)
+            for (int j = 0; j < numberOfParts/numberOfLines -1; j++)
             {
-                Assert.IsTrue(File.Exists(path + $".part{j++.ToString("D3")}"));
+                Assert.IsTrue(File.Exists(path + $".part{j++.ToString("D4")}"));
             }
         }
 
-        [TestMethod]
+        [TestMethod("Checks whether the number of files is equal to the number of parts created by the PartialStreamWriter through multiple threads")]
         public void checkNumberOfPartsMultiThread()
         {
-            string testString = RndString.GetRandomString(5000);
-            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
-            
-            int numberOfParts = 100;
-            int numberOfThreads = 13;
-            int numberOfLines = 5;
             SynchronizedIds counter = new SynchronizedIds();
             List<Task> taskList = new List<Task>(numberOfThreads);
 
@@ -213,29 +221,22 @@ namespace MultiPartStreamTests
             Assert.IsTrue(File.Exists(path));
             for (int j = 0; j < numberOfParts/numberOfLines - 1; j++)
             {
-                Assert.IsTrue(File.Exists(path + $".part{j.ToString("D3")}"));
+                Assert.IsTrue(File.Exists(path + $".part{j.ToString("D4")}"));
             }
         }
 
-        [TestMethod]
-        public void checkEvenrIsRaised()
+        [TestMethod("Checks whether the event are raised in due quantity")]
+        public void checkEventIsRaised()
         {
-            string testString = RndString.GetRandomString(5000);
-            string path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
-
-            int numberOfParts = 100;
-            int numberOfThreads = 13;
-            int numberOfLines = 5;
             SynchronizedIds counter = new SynchronizedIds();
             List<Task> taskList = new List<Task>(numberOfThreads);
-            List<string> eventList = new List<string>();
+            List<NewPartStartedEventArgs> eventList = new List<NewPartStartedEventArgs>();
 
             using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
             {
                 partialStream.NewPartStarted += delegate (object sender, NewPartStartedEventArgs e)
                 {
-                    Console.WriteLine($"New part has been started {e.newPartPath}");
-                    eventList.Add(e.newPartPath);
+                    eventList.Add(e);
                 };
 
                 for (int k = 0; k < numberOfThreads; k++)
@@ -251,7 +252,136 @@ namespace MultiPartStreamTests
                 Task.WaitAll(taskList.ToArray());
             }
 
-            Assert.AreEqual((int)(numberOfParts / numberOfLines) - 1, eventList.Count, $"Actual count is {eventList.Count} expected {(int)(numberOfParts / numberOfParts) - 1}");
+            Assert.AreEqual((int)(numberOfParts / numberOfLines) - 1, eventList.Count, $"Actual count is {eventList.Count} expected {(int)(numberOfParts / numberOfLines) - 1}");
+        }
+
+        [TestMethod("Checks if the system can correctly find all the parts created by the PartialStreamWriter")]
+        public void findAllParts()
+        {
+            using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
+            {
+                for (int i = 0; i < numberOfParts; i++)
+                {
+                    partialStream.WriteLine(testString);
+                }
+            }
+
+            List<string> files = new List<string>
+            {
+                path
+            };
+            files.AddRange(Directory.GetFiles(Path.GetDirectoryName(path), Path.GetFileName(path) + ".part????"));
+
+            Assert.AreEqual(files.Count, (int)(numberOfParts / numberOfLines));
+        }
+
+        [TestMethod("Check correctnes when reading from multiple parts")]
+        public void readFromMultipleParts()
+        {
+            //using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
+            //{
+            //    for (int i = 0; i < numberOfParts; i++)
+            //    {
+            //        partialStream.WriteLine(i.ToString());
+            //    }
+            //}
+
+            MinSizeQueue<string> minSizeQueue = new MinSizeQueue<string>(numberOfThreads);
+
+            List<string> eventList = new List<string>();
+            minSizeQueue.Dequeued += delegate (object sender, QueueEventArgs e)
+            {
+                Console.WriteLine(e.numberInQueue);
+                eventList.Add(e.numberInQueue.ToString());
+            };
+            minSizeQueue.Enqueued += delegate (object sender, QueueEventArgs e)
+            {
+                //Console.WriteLine($"Enqueued {e.numberInQueue}");
+            };
+
+            Task enq = Task.Factory.StartNew(() =>
+            {
+                using (StreamReader stream = new StreamReader(path, Encoding.ASCII, false, 100000))
+                {
+                    string line;
+                    while (true)
+                    {
+                        line = stream.ReadLine();
+                        if (line == null)
+                        {
+                            minSizeQueue.Close();
+                            break;
+                        }
+                        minSizeQueue.Enqueue(line);
+                    }
+                }
+            });
+
+            Directory.GetFiles(Path.GetDirectoryName(path), Path.GetFileName(path) + ".part????")
+                .ToList()
+                .ForEach(t => Task.Factory.StartNew(() =>
+                  {
+                      using (StreamReader stream = new StreamReader(t, Encoding.ASCII, false, 100000))
+                      {
+                          string line;
+                          while (true)
+                          {
+                              line = stream.ReadLine();
+                              if (line == null)
+                              {
+                                  minSizeQueue.Close();
+                                  break;
+                              }
+                              minSizeQueue.Enqueue(line);
+                          }
+                      }
+                  }));
+
+            //Create dequeuers
+            List<Task> deq = new List<Task>();
+            for (int i = 0; i < numberOfThreads; i++)
+            {
+                deq.Add(Task.Factory.StartNew(() =>
+                {
+                    string value;
+                    while (true)
+                    {
+                        if (minSizeQueue.TryDequeue(out value))
+                        {
+                            Console.WriteLine(value);
+                            //Thread.Sleep(100);
+                        }
+                        else
+                        {
+                            minSizeQueue.Close();
+                            break;
+                        }
+                    }
+                }));
+            }
+
+            deq.Add(enq);
+            Task.WaitAll(deq.ToArray<Task>());
+            Assert.AreEqual(eventList.Count, numberOfParts);
+        }
+
+        private void runTask(object state)
+        {
+            MinSizeQueue<string> minSizeQueue = ((Tuple<string, MinSizeQueue<string>>)state).Item2;
+            using (StreamReader stream = new StreamReader(((Tuple<string, MinSizeQueue<string>>)state).Item1, Encoding.ASCII, false, 100000))
+            {
+                string line;
+                while (true)
+                {
+                    line = stream.ReadLine();
+                    if (line == null)
+                    {
+                        minSizeQueue.Close();
+                        break;
+                    }
+                    minSizeQueue.Enqueue(line);
+                }
+            }
         }
     }
 }
