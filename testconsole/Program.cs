@@ -318,22 +318,33 @@ namespace SalesForceAttachmentsBackupTools
             switch (workingMode)
             {
                 case WorkingModes.Read:
-                    using (PartialStreamWriter resultStream = new PartialStreamWriter(numberOfRows, resultFileName, false, Encoding.ASCII))
+                    //Save the initial number of rows queued for backing-up for further comparison
+                    //it may increase due to read errors and re-enqueuing
                     {
-                        resultStream.NewPartStarted += delegate (object sender, NewPartStartedEventArgs e)
+                        List<Task<int>> tasks_int = new List<Task<int>>();
+                        int initialNumberOfRows = listOfIds.Count;
+                        //Holds the number of the rows actually written to the back-up files for the further comaprison
+                        int numberOfBackedRows = 0;
+                        using (PartialStreamWriter resultStream = new PartialStreamWriter(numberOfRows, resultFileName, false, Encoding.ASCII))
                         {
-                            Trace.TraceInformation($"New part has been started {e.newPartPath}");
-                        };
-                        Trace.TraceInformation($"Initiating {numberOfThreads} workers to read data.");
-                        for (int i = 0; i < numberOfThreads; i++)
-                        {
-                            tasks.Add(Task.Run(
-                                () => doWork(listOfIds.ToList(), salesForceSID, objectWithAttachments, 
-                                    cipher.CreateEncryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV), resultStream)));
+                            resultStream.NewPartStarted += delegate (object sender, NewPartStartedEventArgs e)
+                            {
+                                Trace.TraceInformation($"New part has been started {e.newPartPath}");
+                            };
+                            Trace.TraceInformation($"Initiating {numberOfThreads} workers to read data.");
+                            for (int i = 0; i < numberOfThreads; i++)
+                            {
+                                tasks_int.Add(Task<int>.Run(
+                                    () => doWork(listOfIds.ToList(), salesForceSID, objectWithAttachments,
+                                        cipher.CreateEncryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV), resultStream)));
+                            }
+                            Task<int>.WaitAll(tasks_int.ToArray());
+                            tasks_int.ToList<Task<int>>().ForEach(t => numberOfBackedRows += t.Result);
+                            Trace.TraceInformation($"Planned to back-up {initialNumberOfRows} rows, actually backed {numberOfBackedRows} rows; " +
+                                $"{((initialNumberOfRows==numberOfBackedRows)?"the object has been fully backed.":"back-up is not full, please consider revision.")}");
                         }
-                        Task.WaitAll(tasks.ToArray());
+                        break;
                     }
-                    break;
                 case WorkingModes.Write:
                     minSizeQueue = new MinSizeQueue<KeyValuePair<string, string>>(numberOfThreads);
                     
@@ -1171,13 +1182,15 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="cryptoTrans">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="writer">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>
-        private static async Task doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, ICryptoTransform cryptoTrans, PartialStreamWriter writer)
+        private static async Task<int> doWork(ICollection<string> listOfIds, IDictionary<string,string> creds, string obj, 
+            ICryptoTransform cryptoTrans, PartialStreamWriter writer)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId;
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage resp = null;
+            int rowsBackedByThread = 0;
             do
             {
                 currentId = psid.GetCurrentID();
@@ -1208,6 +1221,7 @@ namespace SalesForceAttachmentsBackupTools
                                     cstream.FlushFinalBlock();
                                     byte[] encrypted = stream.ToArray();
                                     writer.WriteLine(listOfIds.ToList()[currentId] + "," + Convert.ToBase64String(encrypted));
+                                    rowsBackedByThread++;
                                 }
                             }
                         }
@@ -1221,7 +1235,8 @@ namespace SalesForceAttachmentsBackupTools
                 }
                 break;
             } while (true);
-            Trace.TraceInformation($"A worker {guid} has finished the work.");
+            Trace.TraceInformation($"A worker {guid} has finished the work. Backed up {rowsBackedByThread} rows.");
+            return rowsBackedByThread;
         }
 
         /// <summary>
@@ -1233,7 +1248,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="creds">A dictionary with sessionId and other stuff required to interact with SalesForce org</param>
         /// <param name="obj">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="cryptoTrans">A shared text stream to store the encrypted data into</param>
-        /// <returns></returns>
+        /// <returns></returns>.
         private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
         {
             Guid guid = Guid.NewGuid();
