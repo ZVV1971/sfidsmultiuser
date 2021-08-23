@@ -166,4 +166,7 @@
       <UserProperties BuildVersion_BuildVersioningStyle="None.None.None.Increment" BuildVersion_StartDate="2000/1/1" BuildVersion_UpdateFileVersion="True" BuildVersion_UpdateAssemblyVersion="True" BuildVersion_UseUniversalClock="False" BuildVersion_DetectChanges="True" BuildVersion_AssemblyInfoFilename="Properties\AssemblyInfo.cs" BuildVersion_UseGlobalSettings="False" />
     </VisualStudio>
   </ProjectExtensions>
+  <PropertyGroup>
+    <PostBuildEvent>copy $(TargetPath) "C:\Users\Uladzimir_Zakharenka\source\repos\nbs-mask\scripts\iics_attachments\"$(TargetFileName) /Y</PostBuildEvent>
+  </PropertyGroup>
 </Project>

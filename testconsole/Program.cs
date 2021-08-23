@@ -629,7 +629,7 @@ namespace SalesForceAttachmentsBackupTools
 
             try
             {
-                requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj + filter);
+                requestUri = new Uri(dic["serverUrl"] + "/query/?q=SELECT+Id+FROM+" + obj + filter + "+ORDER+BY+Id+ASC+NULLS+LAST");
                 Trace.TraceInformation($"Uri to get Ids {requestUri}");
             }
             catch (Exception ex)
@@ -1887,7 +1887,8 @@ namespace SalesForceAttachmentsBackupTools
     enum SFObjectsWithAttachments
     {
         Attachment,
-        Document
+        Document,
+        Note
     }
 
     enum WorkingModes
