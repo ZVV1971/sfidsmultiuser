@@ -50,6 +50,7 @@ namespace SalesForceAttachmentsBackupTools
         private static string filter;
         private static string pathToJSONfile;
         private static string prefix;
+        private static string pathToIDs;                            //Path to the CSV file with IDs to be restored in the write mode
         private static int numberOfRows;                            //Sets the number of rows one part of the back-up file could contain
         private static int numberOfThreads;                         //Sets the number of workers simultaneously executing the Job
         private static int numberOfRetries = 3;                     //Hardcoded number of retries for push
@@ -89,6 +90,7 @@ namespace SalesForceAttachmentsBackupTools
                     numberOfThreads = opt.NumberOfWorkingThreads;
                     useWindowsLogon = opt.UseWindowsAccount == 1;
                     pathToJSONfile = opt.PathToExcludeObjectsJson;
+                    pathToIDs = opt.PathToWriteIDs;
                     if (opt.LogFilePath != null && !opt.LogFilePath.Equals(String.Empty))
                     {
                         Trace.Listeners.Add(new TextWriterTraceListener(opt.LogFilePath, "Backup_fileTracer"));
@@ -339,6 +341,7 @@ namespace SalesForceAttachmentsBackupTools
                                         cipher.CreateEncryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV), resultStream)));
                             }
                             Task<int>.WaitAll(tasks_int.ToArray());
+                            //Count the number of actually added (backed) rows
                             tasks_int.ToList<Task<int>>().ForEach(t => numberOfBackedRows += t.Result);
                             Trace.TraceInformation($"Planned to back-up {initialNumberOfRows} rows, actually backed {numberOfBackedRows} rows; " +
                                 $"{((initialNumberOfRows==numberOfBackedRows)?"the object has been fully backed.":"back-up is not full, please consider revision.")}");
@@ -350,6 +353,63 @@ namespace SalesForceAttachmentsBackupTools
                     
                     //A block just to make the variables local
                     {
+                        Regex reg = new Regex(@"^[a-zA-Z\d]{18}");
+                        List<string> idsToRestore = new List<string>();
+
+                        if (!String.IsNullOrEmpty(pathToIDs) && File.Exists(pathToIDs))
+                        {
+                            Trace.TraceInformation($"The list of IDs has been provided in the {pathToIDs}; analyzing...");
+                            try
+                            {
+                                using (StreamReader reader = new StreamReader(pathToIDs, Encoding.ASCII))
+                                using (CsvReader csv = new CsvReader(reader,
+                                    new CsvConfiguration(CultureInfo.InvariantCulture) { NewLine = "\r\n" }))
+                                {
+                                    csv.Read();
+                                    if (csv.ReadHeader())
+                                    {
+                                        if (csv.HeaderRecord.Length > 0 && csv.HeaderRecord.Any(t => t.Equals("id", StringComparison.InvariantCultureIgnoreCase)))
+                                        {
+                                            int index = Array.FindIndex<string>(csv.HeaderRecord, t => t.Equals("id", StringComparison.InvariantCultureIgnoreCase));
+                                            while (csv.Read())
+                                            {
+                                                string record = new String(csv.GetField<string>(index).ToArray<char>());
+                                                if (reg.Match(record).Captures.Count == 1)
+                                                {
+                                                    idsToRestore.Add(record);
+                                                }
+                                                else
+                                                {
+                                                    Trace.TraceWarning($"Invalid SalesForce Id {record} has been provided for Write filter, skipping...");
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            Trace.TraceError("The provided file with IDs list is OK but no \"id\" column has been found.");
+                                            WaitExitingCountdown(waittime);
+                                            Environment.Exit((int)ExitCodes.IDFileWrongFormatError);
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Trace.TraceError("Error opening file with Ids for write mode."
+#if TRACE
+                                    + $"\n{ex.Message}"
+#endif
+                                    );
+                                WaitExitingCountdown(waittime);
+                                Environment.Exit((int)ExitCodes.OpenIDFileError);
+                            }
+                            Trace.TraceInformation($"{idsToRestore.Count} IDs have been ordered for restoration");
+                        }
+                        else
+                        {
+                            Trace.TraceWarning("No IDs filtering is provided, proceeding with all the backed values");
+                        }
+
                         Queue<string> backupFiles = new Queue<string>(new string[] { resultFileName });
 
                         Directory.GetFiles(Path.GetDirectoryName(resultFileName), Path.GetFileName(resultFileName) + ".part????")
@@ -370,7 +430,8 @@ namespace SalesForceAttachmentsBackupTools
                             {
                                 tasks.Add(Task.Run(
                                     () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, 
-                                        cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV))));
+                                        cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV),
+                                        idsToRestore)));
                             }
                             Task.WaitAll(tasks.ToArray());
                         }
@@ -1050,9 +1111,9 @@ namespace SalesForceAttachmentsBackupTools
                                                     con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
                                                     con.Open();
                                                     using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
-                                                    using (var csv = new CsvReader(inputStreamReader,
+                                                    using (CsvReader csv = new CsvReader(inputStreamReader,
                                                     new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
-                                                    using (var dr = new CsvDataReader(csv))
+                                                    using (CsvDataReader dr = new CsvDataReader(csv))
                                                     {
                                                         DataTable dt = new DataTable();
                                                         dt.Load(dr);
@@ -1271,7 +1332,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="cryptoTrans">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>.
         private static async Task<int> doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj,
-            ICryptoTransform cryptoTrans) 
+            ICryptoTransform cryptoTrans, List<string> idList = null) 
         {
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
@@ -1282,67 +1343,74 @@ namespace SalesForceAttachmentsBackupTools
                 KeyValuePair<string, string> att;
                 if (minSizeQueue.TryDequeue(out att))
                 {
-                    byte[] valueBytes = null;
-                    try
+                    if (idList == null || idList.Count == 0 || idList.Contains(att.Key))
                     {
-                        valueBytes = Convert.FromBase64String(att.Value);
-                    }
-                    catch
-                    {
-                        Trace.TraceError($"Thread {guid} has caught an error decoding Base64 value for {att.Key}");
-                        continue;
-                    }
-                    if (valueBytes.Length > 0) 
-                    {
-                        //MemoryStream to store decrypted body to
-                        using (MemoryStream stream = new MemoryStream(Convert.FromBase64String(att.Value)))
+                        byte[] valueBytes = null;
+                        try
                         {
-                            using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Read))
+                            valueBytes = Convert.FromBase64String(att.Value);
+                        }
+                        catch
+                        {
+                            Trace.TraceError($"Thread {guid} has caught an error decoding Base64 value for {att.Key}");
+                            continue;
+                        }
+                        if (valueBytes.Length > 0)
+                        {
+                            //MemoryStream to store decrypted body to
+                            using (MemoryStream stream = new MemoryStream(Convert.FromBase64String(att.Value)))
                             {
-                                byte[] decrypted = new byte[valueBytes.Length];
-                                try
+                                using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Read))
                                 {
-                                    int bytesRead = cstream.Read(decrypted, 0, valueBytes.Length);
-                                    if (bytesRead > 0)
+                                    byte[] decrypted = new byte[valueBytes.Length];
+                                    try
                                     {
-                                        string decryptedValue = Convert.ToBase64String(decrypted);
-                                        string json = "{\"Body\":\"" + decryptedValue +"\"}";
-                                        try
+                                        int bytesRead = cstream.Read(decrypted, 0, valueBytes.Length);
+                                        if (bytesRead > 0)
                                         {
-                                            response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key),
-                                                creds, new HttpMethod("PATCH"), json);
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Trace.TraceError($"Thread {guid} has caught an exception while working in write mode.\n" +
-                                                ex.Message);
-                                        }
+                                            string decryptedValue = Convert.ToBase64String(decrypted);
+                                            string json = "{\"Body\":\"" + decryptedValue + "\"}";
+                                            try
+                                            {
+                                                response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key),
+                                                    creds, new HttpMethod("PATCH"), json);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Trace.TraceError($"Thread {guid} has caught an exception while working in write mode.\n" +
+                                                    ex.Message);
+                                            }
 
-                                        if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
-                                        {
-                                            Trace.TraceInformation($"Thread {guid} has successfully updated {att.Key}");
-                                            rowsBackedByThread++;
-                                        }
-                                        else if (response.StatusCode == HttpStatusCode.NoContent)
-                                        {
-                                            Trace.TraceInformation($"Thread {guid} has obviously modified {att.Key}'s content, though \"no content\" has been returned.");
-                                        }
-                                        else
-                                        {
-                                            Trace.TraceError($"Thread {guid} failed to update {att.Key}. Code: {response?.StatusCode}");
+                                            if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
+                                            {
+                                                Trace.TraceInformation($"Thread {guid} has successfully updated {att.Key}");
+                                                rowsBackedByThread++;
+                                            }
+                                            else if (response.StatusCode == HttpStatusCode.NoContent)
+                                            {
+                                                Trace.TraceInformation($"Thread {guid} has obviously modified {att.Key}'s content, though \"no content\" has been returned.");
+                                            }
+                                            else
+                                            {
+                                                Trace.TraceError($"Thread {guid} failed to update {att.Key}. Code: {response?.StatusCode}");
+                                            }
                                         }
                                     }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Trace.TraceError($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
+                                    catch (Exception ex)
+                                    {
+                                        Trace.TraceError($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
+                                    }
                                 }
                             }
-                        } 
+                        }
+                        else
+                        {
+                            Trace.TraceError($"Thread {guid}. {att.Key} didn't give any body for writing.");
+                        }
                     }
                     else
                     {
-                        Trace.TraceError($"Thread {guid}. {att.Key} didn't give any body for writing.");
+                        Trace.TraceInformation($"Thread {guid} has skipped ID {att.Key} according to the given IDs list");
                     }
                 }
                 else 
@@ -1912,7 +1980,7 @@ namespace SalesForceAttachmentsBackupTools
         public string ORCLEntryName { get; set; }
 
         [Option("pushtimeout", MetaValue = "120", Default = 120,
-            HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Please, set it to a bigger value if you'll get too many warnings in the log.")]
+            HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Set it to a bigger value if you'll get too many warnings in the log.")]
         public int PushTimeout { get; set; }
 
         [Option("retries", MetaValue ="3", Default = 3,
@@ -1920,8 +1988,12 @@ namespace SalesForceAttachmentsBackupTools
         public int RetriesNumber { get; set; }
         
         [Option("maxrows", MetaValue ="1000", Default = int.MaxValue,
-            HelpText ="Sets the maximal number of rows that one part of the back-up file could contain (>=1)")]
+            HelpText = "Sets the maximal number of rows that one part of the back-up file could contain (>=1)")]
         public int MaxRowsInAPart { get; set; }
+
+        [Option("idstorestore", MetaValue ="D:\\restore.ids",
+            HelpText = "A list of IDs to be restored in write mode. A CSV file with only one column - \"ID\". If left empty all the IDs are restored")]
+        public string PathToWriteIDs { get; set; }
     }
 
     enum SFObjectsWithAttachments
@@ -1950,7 +2022,9 @@ namespace SalesForceAttachmentsBackupTools
         NothingToReadError = -6,
         SourceFileDoesNorExistsError = -7,
         TargetDBConnectionError = -8,
-        UnknownError = -999,
-        ObjectListError = -9
+        ObjectListError = -9,
+        IDFileWrongFormatError = -10,
+        OpenIDFileError = -11,
+        UnknownError = -999
     }
 }
