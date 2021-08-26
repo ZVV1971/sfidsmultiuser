@@ -422,6 +422,8 @@ namespace SalesForceAttachmentsBackupTools
                     {
                         salesForceSID.Add("pathToJson", Path.Combine(Directory.GetCurrentDirectory(), "ObjectsToExclude.json"));
                     }
+
+                    //A Tuple is used to work-around the impossibility to have out parameters in the async methods
                     Tuple<IEnumerable<string>, JToken> jsonParseResult = await GetListOfObjects(salesForceSID, filter);
                     if(jsonParseResult.Item2 == null)
                     {
@@ -704,10 +706,10 @@ namespace SalesForceAttachmentsBackupTools
 
             if (!creds.TryGetValue("prefix", out prfx)) prfx = "ABCDE";
 
-            //A loop till the queue is not empty
+            //A loop till the queue with objects is not empty
             do
             {
-                //Initialize variables for every object
+                //Initialize variables for each object
                 initialSleep = 3;
                 numberOfRecords = int.MaxValue;
                 currentId = psid.GetCurrentID();
@@ -1157,6 +1159,25 @@ namespace SalesForceAttachmentsBackupTools
                         {
                             Trace.TraceError($"Thread {guid} has got {idJobs.Count(t => t.IsCanceled || t.IsFaulted)} batches not-pushed");
                         }
+                        else
+                        {
+                            //Taking a 5 seconds nap to let the uploading threads that did return though didn't actually finished uploading finish their work
+                            Thread.Sleep(5000);
+                            //Doing check of the number of uploaded rows
+                            Trace.TraceInformation($"Thread {guid} is counting the number of rows uploaded into Oracl DB from {currObject}");
+                            using (OracleConnection con = new OracleConnection())
+                            {
+                                con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
+                                con.Open();
+                                OracleCommand ocmd = new OracleCommand($"SELECT COUNT(*) FROM {tableName}", con);
+                                object o = ocmd.ExecuteScalar();
+                                int actualNumberOfRows = (int)((decimal)o);
+                                Trace.TraceInformation($"Thread {guid} has expected to upload {(mixedIds.Count == 0 ? numberOfRecords : mixedIds.Count)} rows from " +
+                                    $"the {currObject} into Oracle, actually uploaded {actualNumberOfRows}; " +
+                                    $"{((actualNumberOfRows == (mixedIds.Count == 0 ? numberOfRecords : mixedIds.Count)) ? "upload has been successful" : "upload is done only partial")}");
+                                con.Close();
+                            }
+                        }
                     }
                     else
                     {
@@ -1249,11 +1270,13 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="obj">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="cryptoTrans">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>.
-        private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
+        private static async Task<int> doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj,
+            ICryptoTransform cryptoTrans) 
         {
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage response = null;
+            int rowsBackedByThread = 0;
             while (true) 
             {
                 KeyValuePair<string, string> att;
@@ -1298,6 +1321,7 @@ namespace SalesForceAttachmentsBackupTools
                                         if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
                                         {
                                             Trace.TraceInformation($"Thread {guid} has successfully updated {att.Key}");
+                                            rowsBackedByThread++;
                                         }
                                         else if (response.StatusCode == HttpStatusCode.NoContent)
                                         {
@@ -1328,6 +1352,7 @@ namespace SalesForceAttachmentsBackupTools
                 }
             }
             Trace.TraceInformation($"A worker {guid} has finished the work.");
+            return rowsBackedByThread;
         }
 
         /// <summary>
