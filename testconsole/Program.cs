@@ -58,6 +58,8 @@ namespace SalesForceAttachmentsBackupTools
         private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
         private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
         private static int bulkQueryLengthLimit = 100000;           //The limit imposed by the SalesForce on the bulk query length
+        private static int delayBetweenIDSkips = 50;                //The delay in milliseconds between thread skipping the row in the write mode and take an ID
+                                                                    //Needed to be introduced since the consuming threads do devour rows too fast when skipping 
         private static HttpClient client = new HttpClient() { Timeout = Timeout.InfiniteTimeSpan};
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
@@ -79,7 +81,7 @@ namespace SalesForceAttachmentsBackupTools
                 (Options opt) =>
                 {
                     if (opt.RetriesNumber >= 0 && opt.RetriesNumber <= 10) numberOfRetries = opt.RetriesNumber;
-                    pushTimeOut = opt.PushTimeout;
+                    pushTimeOut = 0;// opt.PushTimeout;
                     domainName = opt.SalesForceDomain;
                     groupName = opt.GroupName;
                     entryName = opt.EntryName;
@@ -947,7 +949,7 @@ namespace SalesForceAttachmentsBackupTools
                         List<Task> idJobs = new List<Task>();
                         CancellationTokenSource source = new CancellationTokenSource();
                         //will throttle the number of simultaneously running push tasks
-                        Semaphore slim = new Semaphore(0, 3, "semaphore_" + guid.ToString("N"));
+                        Semaphore slim = new Semaphore(3, 3, "semaphore_" + guid.ToString("N"));
                         //For every batch (run)
                         do {
                             bool commaFlag = false;
@@ -1058,6 +1060,8 @@ namespace SalesForceAttachmentsBackupTools
                                 }
                             }
 
+                            DataTable bulkData = new DataTable();
+
                             //Run the process getting the data in a separate thread
                             idJobs.Add(Task.Run(async () =>                                {
                                 int iniSleep = 3;
@@ -1099,7 +1103,7 @@ namespace SalesForceAttachmentsBackupTools
                                         //in one batch
                                         jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results?maxRecords=10000")
                                             , creds, HttpMethod.Get, accepts: "txt/csv");
-
+                                        
                                         try
                                         {
                                             Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
@@ -1182,22 +1186,9 @@ namespace SalesForceAttachmentsBackupTools
                                                     }     //Of using CsvReader
 
                                                     con.Close();
-
                                                 }         //Of using Oracle connection
-                                            });           //Async lambda method
-                                        }
-                                        finally
-                                        {
-                                            try
-                                            {
                                                 slim.Release();
-                                            }
-                                            catch (Exception xpt)
-                                            {
-#if TRACE
-                                                Trace.TraceWarning($"Thread {guid} has caught an exception while releasing a lock: {xpt.Message}");
-#endif
-                                            }
+                                            });           //Async lambda method
                                         }
                                     }
                                     else // Job is NOT complete
@@ -1411,6 +1402,8 @@ namespace SalesForceAttachmentsBackupTools
                     else
                     {
                         Trace.TraceInformation($"Thread {guid} has skipped ID {att.Key} according to the given IDs list");
+                        //Since skipping is done quite fast, need to add a small delay
+                        Thread.Sleep(delayBetweenIDSkips);
                     }
                 }
                 else 
