@@ -162,15 +162,13 @@ namespace SalesForceAttachmentsBackupTools
                 },
                 (IEnumerable<Error> errs) =>
                 {
-                    //Let the user to read the error message and exit after waittime expires
+                    //Let the user read the error message and exit after waittime expires
                     WaitExitingCountdown(waittime);
                     Environment.Exit((int)ExitCodes.ArgumentParsingError);
                     return 0;
                 });
 
-            Assembly execAssembly = Assembly.GetExecutingAssembly();
-
-            AssemblyName name = execAssembly.GetName();
+            AssemblyName name = Assembly.GetExecutingAssembly().GetName();
 
             Trace.TraceInformation(string.Format("{0} {1:0}.{2:0}.{3:0}.{4:0}",
                 "current version",
@@ -358,6 +356,7 @@ namespace SalesForceAttachmentsBackupTools
                         Regex reg = new Regex(@"^[a-zA-Z\d]{18}");
                         List<string> idsToRestore = new List<string>();
 
+                        //Process the list of IDs to be restore if any is given
                         if (!String.IsNullOrEmpty(pathToIDs) && File.Exists(pathToIDs))
                         {
                             Trace.TraceInformation($"The list of IDs has been provided in the {pathToIDs}; analyzing...");
@@ -490,16 +489,18 @@ namespace SalesForceAttachmentsBackupTools
                     Tuple<IEnumerable<string>, JToken> jsonParseResult = await GetListOfObjects(salesForceSID, filter);
                     if(jsonParseResult.Item2 == null)
                     {
+                        Trace.TraceError("No nonsensitive pairs were returned from the given path.");
                         WaitExitingCountdown(waittime);
                         Environment.Exit((int)ExitCodes.ObjectListError);
                     }
                     listOfIds = jsonParseResult.Item1.ToList<string>();
                     listOfNonSensitivePairs = jsonParseResult.Item2;
+                    List<Task> uploadTasks = new List<Task>();
 
                     //Add prefix to the dictionary
                     salesForceSID.Add("prefix", prefix);
 
-                    Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
+                    Trace.TraceInformation($"Initiating {numberOfThreads} workers to create a representative subsets of the data.");
                     Trace.TraceInformation($"Prefix for the tables is {prefix}");
 
                     //Pass a new list to each thread to get the files that need to be cleared up
@@ -509,9 +510,10 @@ namespace SalesForceAttachmentsBackupTools
                         tasks.Add(Task.Run(
                             () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.Equals("ORCLConnectionString"))
                                 .ToDictionary(k=>k.Key, k=>k.Value),
-                            listOfNonSensitivePairs)));
+                            listOfNonSensitivePairs, uploadTasks)));
                     }
                     Task.WaitAll(tasks.ToArray());
+                    Trace.TraceInformation($"Wating for {uploadTasks.Count(t => (!t.IsCompleted && !t.IsFaulted && !t.IsFaulted))} upload tasks to finish");
                     break;
                 default:
                     break;
@@ -752,10 +754,13 @@ namespace SalesForceAttachmentsBackupTools
         /// A worker for Subset mode; creates subsets from the SalesForce org
         /// </summary>
         /// <param name="listOfIds">List of objects to be processed</param>
-        /// <param name="creds">credentials</param>
+        /// <param name="creds">credentials to connect to the salesforce org etc</param>
+        /// <param name="ORCLcreds">credentials to connect to the oracle instance</param>
+        /// <param name="excludeFields">JSON with the list of Object:Field values to be excluded from the subsetting</param>
+        /// <param name="uploadTasks">the list of tasks started to upload the sensitive data in the RDB to be waited on after the worker thread has finished</param>
         /// <returns></returns>
         private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string
-            , ProtectedString> ORCLcreds, JToken excludeFields)
+            , ProtectedString> ORCLcreds, JToken excludeFields, List<Task> uploadTasks)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
@@ -1107,7 +1112,7 @@ namespace SalesForceAttachmentsBackupTools
                                         try
                                         {
                                             Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
-                                            _ = Task.Run(async () =>
+                                            uploadTasks.Add(Task.Run(async () =>
                                             {
                                                 slim.WaitOne();
                                                 using (OracleConnection con = new OracleConnection())
@@ -1187,8 +1192,17 @@ namespace SalesForceAttachmentsBackupTools
 
                                                     con.Close();
                                                 }         //Of using Oracle connection
+                                                //Release the semphore and decrease its counter so as the others thread
+                                                //Could enter it and start execution
                                                 slim.Release();
-                                            });           //Async lambda method
+                                            }));           //Of the Async lambda method
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Trace.TraceError("An exception has occured");
+#if TRACE
+                                            Trace.TraceError(ex.Message);
+#endif
                                         }
                                     }
                                     else // Job is NOT complete
