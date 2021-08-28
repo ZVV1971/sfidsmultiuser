@@ -50,6 +50,7 @@ namespace SalesForceAttachmentsBackupTools
         private static string filter;
         private static string pathToJSONfile;
         private static string prefix;
+        private static string pathToIDs;                            //Path to the CSV file with IDs to be restored in the write mode
         private static int numberOfRows;                            //Sets the number of rows one part of the back-up file could contain
         private static int numberOfThreads;                         //Sets the number of workers simultaneously executing the Job
         private static int numberOfRetries = 3;                     //Hardcoded number of retries for push
@@ -57,6 +58,8 @@ namespace SalesForceAttachmentsBackupTools
         private static int minNumberOfRecords = int.MaxValue;       //Minimal number of records when subset cannot be done
         private static int percentForSubset = 100;                  //Percent of original data to be passed to the subset
         private static int bulkQueryLengthLimit = 100000;           //The limit imposed by the SalesForce on the bulk query length
+        private static int delayBetweenIDSkips = 50;                //The delay in milliseconds between thread skipping the row in the write mode and take an ID
+                                                                    //Needed to be introduced since the consuming threads do devour rows too fast when skipping 
         private static HttpClient client = new HttpClient() { Timeout = Timeout.InfiniteTimeSpan};
         private static ConsoleKeyInfo key;
         private static WorkingModes workingMode;
@@ -78,7 +81,7 @@ namespace SalesForceAttachmentsBackupTools
                 (Options opt) =>
                 {
                     if (opt.RetriesNumber >= 0 && opt.RetriesNumber <= 10) numberOfRetries = opt.RetriesNumber;
-                    pushTimeOut = opt.PushTimeout;
+                    pushTimeOut = 0;// opt.PushTimeout;
                     domainName = opt.SalesForceDomain;
                     groupName = opt.GroupName;
                     entryName = opt.EntryName;
@@ -89,6 +92,7 @@ namespace SalesForceAttachmentsBackupTools
                     numberOfThreads = opt.NumberOfWorkingThreads;
                     useWindowsLogon = opt.UseWindowsAccount == 1;
                     pathToJSONfile = opt.PathToExcludeObjectsJson;
+                    pathToIDs = opt.PathToWriteIDs;
                     if (opt.LogFilePath != null && !opt.LogFilePath.Equals(String.Empty))
                     {
                         Trace.Listeners.Add(new TextWriterTraceListener(opt.LogFilePath, "Backup_fileTracer"));
@@ -158,15 +162,13 @@ namespace SalesForceAttachmentsBackupTools
                 },
                 (IEnumerable<Error> errs) =>
                 {
-                    //Let the user to read the error message and exit after waittime expires
+                    //Let the user read the error message and exit after waittime expires
                     WaitExitingCountdown(waittime);
                     Environment.Exit((int)ExitCodes.ArgumentParsingError);
                     return 0;
                 });
 
-            Assembly execAssembly = Assembly.GetExecutingAssembly();
-
-            AssemblyName name = execAssembly.GetName();
+            AssemblyName name = Assembly.GetExecutingAssembly().GetName();
 
             Trace.TraceInformation(string.Format("{0} {1:0}.{2:0}.{3:0}.{4:0}",
                 "current version",
@@ -339,6 +341,7 @@ namespace SalesForceAttachmentsBackupTools
                                         cipher.CreateEncryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV), resultStream)));
                             }
                             Task<int>.WaitAll(tasks_int.ToArray());
+                            //Count the number of actually added (backed) rows
                             tasks_int.ToList<Task<int>>().ForEach(t => numberOfBackedRows += t.Result);
                             Trace.TraceInformation($"Planned to back-up {initialNumberOfRows} rows, actually backed {numberOfBackedRows} rows; " +
                                 $"{((initialNumberOfRows==numberOfBackedRows)?"the object has been fully backed.":"back-up is not full, please consider revision.")}");
@@ -350,6 +353,64 @@ namespace SalesForceAttachmentsBackupTools
                     
                     //A block just to make the variables local
                     {
+                        Regex reg = new Regex(@"^[a-zA-Z\d]{18}");
+                        List<string> idsToRestore = new List<string>();
+
+                        //Process the list of IDs to be restore if any is given
+                        if (!String.IsNullOrEmpty(pathToIDs) && File.Exists(pathToIDs))
+                        {
+                            Trace.TraceInformation($"The list of IDs has been provided in the {pathToIDs}; analyzing...");
+                            try
+                            {
+                                using (StreamReader reader = new StreamReader(pathToIDs, Encoding.ASCII))
+                                using (CsvReader csv = new CsvReader(reader,
+                                    new CsvConfiguration(CultureInfo.InvariantCulture) { NewLine = "\r\n" }))
+                                {
+                                    csv.Read();
+                                    if (csv.ReadHeader())
+                                    {
+                                        if (csv.HeaderRecord.Length > 0 && csv.HeaderRecord.Any(t => t.Equals("id", StringComparison.InvariantCultureIgnoreCase)))
+                                        {
+                                            int index = Array.FindIndex<string>(csv.HeaderRecord, t => t.Equals("id", StringComparison.InvariantCultureIgnoreCase));
+                                            while (csv.Read())
+                                            {
+                                                string record = new String(csv.GetField<string>(index).ToArray<char>());
+                                                if (reg.Match(record).Captures.Count == 1)
+                                                {
+                                                    idsToRestore.Add(record);
+                                                }
+                                                else
+                                                {
+                                                    Trace.TraceWarning($"Invalid SalesForce Id {record} has been provided for Write filter, skipping...");
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            Trace.TraceError("The provided file with IDs list is OK but no \"id\" column has been found.");
+                                            WaitExitingCountdown(waittime);
+                                            Environment.Exit((int)ExitCodes.IDFileWrongFormatError);
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Trace.TraceError("Error opening file with Ids for write mode."
+#if TRACE
+                                    + $"\n{ex.Message}"
+#endif
+                                    );
+                                WaitExitingCountdown(waittime);
+                                Environment.Exit((int)ExitCodes.OpenIDFileError);
+                            }
+                            Trace.TraceInformation($"{idsToRestore.Count} IDs have been ordered for restoration");
+                        }
+                        else
+                        {
+                            Trace.TraceWarning("No IDs filtering is provided, proceeding with all the backed values");
+                        }
+
                         Queue<string> backupFiles = new Queue<string>(new string[] { resultFileName });
 
                         Directory.GetFiles(Path.GetDirectoryName(resultFileName), Path.GetFileName(resultFileName) + ".part????")
@@ -370,7 +431,8 @@ namespace SalesForceAttachmentsBackupTools
                             {
                                 tasks.Add(Task.Run(
                                     () => doWork(minSizeQueue, salesForceSID, objectWithAttachments, 
-                                        cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV))));
+                                        cipher.CreateDecryptor(Convert.FromBase64String(credentialsDict["pwdKey"].ReadString()), cipher.IV),
+                                        idsToRestore)));
                             }
                             Task.WaitAll(tasks.ToArray());
                         }
@@ -422,19 +484,23 @@ namespace SalesForceAttachmentsBackupTools
                     {
                         salesForceSID.Add("pathToJson", Path.Combine(Directory.GetCurrentDirectory(), "ObjectsToExclude.json"));
                     }
+
+                    //A Tuple is used to work-around the impossibility to have out parameters in the async methods
                     Tuple<IEnumerable<string>, JToken> jsonParseResult = await GetListOfObjects(salesForceSID, filter);
                     if(jsonParseResult.Item2 == null)
                     {
+                        Trace.TraceError("No nonsensitive pairs were returned from the given path.");
                         WaitExitingCountdown(waittime);
                         Environment.Exit((int)ExitCodes.ObjectListError);
                     }
                     listOfIds = jsonParseResult.Item1.ToList<string>();
                     listOfNonSensitivePairs = jsonParseResult.Item2;
+                    List<Task> uploadTasks = new List<Task>();
 
                     //Add prefix to the dictionary
                     salesForceSID.Add("prefix", prefix);
 
-                    Trace.TraceInformation($"Initiating {numberOfThreads} workers to create representative subsets of the data.");
+                    Trace.TraceInformation($"Initiating {numberOfThreads} workers to create a representative subsets of the data.");
                     Trace.TraceInformation($"Prefix for the tables is {prefix}");
 
                     //Pass a new list to each thread to get the files that need to be cleared up
@@ -444,9 +510,10 @@ namespace SalesForceAttachmentsBackupTools
                         tasks.Add(Task.Run(
                             () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.Equals("ORCLConnectionString"))
                                 .ToDictionary(k=>k.Key, k=>k.Value),
-                            listOfNonSensitivePairs)));
+                            listOfNonSensitivePairs, uploadTasks)));
                     }
                     Task.WaitAll(tasks.ToArray());
+                    Trace.TraceInformation($"Wating for {uploadTasks.Count(t => (!t.IsCompleted && !t.IsFaulted && !t.IsFaulted))} upload tasks to finish");
                     break;
                 default:
                     break;
@@ -687,10 +754,13 @@ namespace SalesForceAttachmentsBackupTools
         /// A worker for Subset mode; creates subsets from the SalesForce org
         /// </summary>
         /// <param name="listOfIds">List of objects to be processed</param>
-        /// <param name="creds">credentials</param>
+        /// <param name="creds">credentials to connect to the salesforce org etc</param>
+        /// <param name="ORCLcreds">credentials to connect to the oracle instance</param>
+        /// <param name="excludeFields">JSON with the list of Object:Field values to be excluded from the subsetting</param>
+        /// <param name="uploadTasks">the list of tasks started to upload the sensitive data in the RDB to be waited on after the worker thread has finished</param>
         /// <returns></returns>
         private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string
-            , ProtectedString> ORCLcreds, JToken excludeFields)
+            , ProtectedString> ORCLcreds, JToken excludeFields, List<Task> uploadTasks)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
@@ -704,10 +774,10 @@ namespace SalesForceAttachmentsBackupTools
 
             if (!creds.TryGetValue("prefix", out prfx)) prfx = "ABCDE";
 
-            //A loop till the queue is not empty
+            //A loop till the queue with objects is not empty
             do
             {
-                //Initialize variables for every object
+                //Initialize variables for each object
                 initialSleep = 3;
                 numberOfRecords = int.MaxValue;
                 currentId = psid.GetCurrentID();
@@ -884,7 +954,7 @@ namespace SalesForceAttachmentsBackupTools
                         List<Task> idJobs = new List<Task>();
                         CancellationTokenSource source = new CancellationTokenSource();
                         //will throttle the number of simultaneously running push tasks
-                        Semaphore slim = new Semaphore(0, 3, "semaphore_" + guid.ToString("N"));
+                        Semaphore slim = new Semaphore(3, 3, "semaphore_" + guid.ToString("N"));
                         //For every batch (run)
                         do {
                             bool commaFlag = false;
@@ -995,6 +1065,8 @@ namespace SalesForceAttachmentsBackupTools
                                 }
                             }
 
+                            DataTable bulkData = new DataTable();
+
                             //Run the process getting the data in a separate thread
                             idJobs.Add(Task.Run(async () =>                                {
                                 int iniSleep = 3;
@@ -1036,11 +1108,11 @@ namespace SalesForceAttachmentsBackupTools
                                         //in one batch
                                         jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results?maxRecords=10000")
                                             , creds, HttpMethod.Get, accepts: "txt/csv");
-
+                                        
                                         try
                                         {
                                             Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
-                                            _ = Task.Run(async () =>
+                                            uploadTasks.Add(Task.Run(async () =>
                                             {
                                                 slim.WaitOne();
                                                 using (OracleConnection con = new OracleConnection())
@@ -1048,9 +1120,9 @@ namespace SalesForceAttachmentsBackupTools
                                                     con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
                                                     con.Open();
                                                     using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
-                                                    using (var csv = new CsvReader(inputStreamReader,
+                                                    using (CsvReader csv = new CsvReader(inputStreamReader,
                                                     new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
-                                                    using (var dr = new CsvDataReader(csv))
+                                                    using (CsvDataReader dr = new CsvDataReader(csv))
                                                     {
                                                         DataTable dt = new DataTable();
                                                         dt.Load(dr);
@@ -1119,22 +1191,18 @@ namespace SalesForceAttachmentsBackupTools
                                                     }     //Of using CsvReader
 
                                                     con.Close();
-
                                                 }         //Of using Oracle connection
-                                            });           //Async lambda method
-                                        }
-                                        finally
-                                        {
-                                            try
-                                            {
+                                                //Release the semphore and decrease its counter so as the others thread
+                                                //Could enter it and start execution
                                                 slim.Release();
-                                            }
-                                            catch (Exception xpt)
-                                            {
+                                            }));           //Of the Async lambda method
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Trace.TraceError("An exception has occured");
 #if TRACE
-                                                Trace.TraceWarning($"Thread {guid} has caught an exception while releasing a lock: {xpt.Message}");
+                                            Trace.TraceError(ex.Message);
 #endif
-                                            }
                                         }
                                     }
                                     else // Job is NOT complete
@@ -1156,6 +1224,25 @@ namespace SalesForceAttachmentsBackupTools
                         if (idJobs.Count(t=>t.IsCanceled || t.IsFaulted) != 0)
                         {
                             Trace.TraceError($"Thread {guid} has got {idJobs.Count(t => t.IsCanceled || t.IsFaulted)} batches not-pushed");
+                        }
+                        else
+                        {
+                            //Taking a 5 seconds nap to let the uploading threads that did return though didn't actually finished uploading finish their work
+                            Thread.Sleep(5000);
+                            //Doing check of the number of uploaded rows
+                            Trace.TraceInformation($"Thread {guid} is counting the number of rows uploaded into Oracl DB from {currObject}");
+                            using (OracleConnection con = new OracleConnection())
+                            {
+                                con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
+                                con.Open();
+                                OracleCommand ocmd = new OracleCommand($"SELECT COUNT(*) FROM {tableName}", con);
+                                object o = ocmd.ExecuteScalar();
+                                int actualNumberOfRows = (int)((decimal)o);
+                                Trace.TraceInformation($"Thread {guid} has expected to upload {(mixedIds.Count == 0 ? numberOfRecords : mixedIds.Count)} rows from " +
+                                    $"the {currObject} into Oracle, actually uploaded {actualNumberOfRows}; " +
+                                    $"{((actualNumberOfRows == (mixedIds.Count == 0 ? numberOfRecords : mixedIds.Count)) ? "upload has been successful" : "upload is done only partial")}");
+                                con.Close();
+                            }
                         }
                     }
                     else
@@ -1249,76 +1336,88 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="obj">Cryptographic stuff necessary to encrypt the attachment content</param>
         /// <param name="cryptoTrans">A shared text stream to store the encrypted data into</param>
         /// <returns></returns>.
-        private static async Task doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj, ICryptoTransform cryptoTrans) 
+        private static async Task<int> doWork(MinSizeQueue<KeyValuePair<string,string>> queue, IDictionary<string, string> creds, string obj,
+            ICryptoTransform cryptoTrans, List<string> idList = null) 
         {
             Guid guid = Guid.NewGuid();
             Trace.TraceInformation($"A worker {guid} has started.");
             HttpResponseMessage response = null;
+            int rowsBackedByThread = 0;
             while (true) 
             {
                 KeyValuePair<string, string> att;
                 if (minSizeQueue.TryDequeue(out att))
                 {
-                    byte[] valueBytes = null;
-                    try
+                    if (idList == null || idList.Count == 0 || idList.Contains(att.Key))
                     {
-                        valueBytes = Convert.FromBase64String(att.Value);
-                    }
-                    catch
-                    {
-                        Trace.TraceError($"Thread {guid} has caught an error decoding Base64 value for {att.Key}");
-                        continue;
-                    }
-                    if (valueBytes.Length > 0) 
-                    {
-                        //MemoryStream to store decrypted body to
-                        using (MemoryStream stream = new MemoryStream(Convert.FromBase64String(att.Value)))
+                        byte[] valueBytes = null;
+                        try
                         {
-                            using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Read))
+                            valueBytes = Convert.FromBase64String(att.Value);
+                        }
+                        catch
+                        {
+                            Trace.TraceError($"Thread {guid} has caught an error decoding Base64 value for {att.Key}");
+                            continue;
+                        }
+                        if (valueBytes.Length > 0)
+                        {
+                            //MemoryStream to store decrypted body to
+                            using (MemoryStream stream = new MemoryStream(Convert.FromBase64String(att.Value)))
                             {
-                                byte[] decrypted = new byte[valueBytes.Length];
-                                try
+                                using (CryptoStream cstream = new CryptoStream(stream, cryptoTrans, CryptoStreamMode.Read))
                                 {
-                                    int bytesRead = cstream.Read(decrypted, 0, valueBytes.Length);
-                                    if (bytesRead > 0)
+                                    byte[] decrypted = new byte[valueBytes.Length];
+                                    try
                                     {
-                                        string decryptedValue = Convert.ToBase64String(decrypted);
-                                        string json = "{\"Body\":\"" + decryptedValue +"\"}";
-                                        try
+                                        int bytesRead = cstream.Read(decrypted, 0, valueBytes.Length);
+                                        if (bytesRead > 0)
                                         {
-                                            response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key),
-                                                creds, new HttpMethod("PATCH"), json);
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Trace.TraceError($"Thread {guid} has caught an exception while working in write mode.\n" +
-                                                ex.Message);
-                                        }
+                                            string decryptedValue = Convert.ToBase64String(decrypted);
+                                            string json = "{\"Body\":\"" + decryptedValue + "\"}";
+                                            try
+                                            {
+                                                response = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/sobjects/" + obj + "/" + att.Key),
+                                                    creds, new HttpMethod("PATCH"), json);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Trace.TraceError($"Thread {guid} has caught an exception while working in write mode.\n" +
+                                                    ex.Message);
+                                            }
 
-                                        if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
-                                        {
-                                            Trace.TraceInformation($"Thread {guid} has successfully updated {att.Key}");
-                                        }
-                                        else if (response.StatusCode == HttpStatusCode.NoContent)
-                                        {
-                                            Trace.TraceInformation($"Thread {guid} has obviously modified {att.Key}'s content, though \"no content\" has been returned.");
-                                        }
-                                        else
-                                        {
-                                            Trace.TraceError($"Thread {guid} failed to update {att.Key}. Code: {response?.StatusCode}");
+                                            if (response != null && response.Content != null && response.StatusCode == HttpStatusCode.OK)
+                                            {
+                                                Trace.TraceInformation($"Thread {guid} has successfully updated {att.Key}");
+                                                rowsBackedByThread++;
+                                            }
+                                            else if (response.StatusCode == HttpStatusCode.NoContent)
+                                            {
+                                                Trace.TraceInformation($"Thread {guid} has obviously modified {att.Key}'s content, though \"no content\" has been returned.");
+                                            }
+                                            else
+                                            {
+                                                Trace.TraceError($"Thread {guid} failed to update {att.Key}. Code: {response?.StatusCode}");
+                                            }
                                         }
                                     }
-                                }
-                                catch (Exception ex)
-                                {
-                                    Trace.TraceError($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
+                                    catch (Exception ex)
+                                    {
+                                        Trace.TraceError($"{ex.Message}\noccured while trying to update {att.Key} from {guid}");
+                                    }
                                 }
                             }
-                        } 
+                        }
+                        else
+                        {
+                            Trace.TraceError($"Thread {guid}. {att.Key} didn't give any body for writing.");
+                        }
                     }
                     else
                     {
-                        Trace.TraceError($"Thread {guid}. {att.Key} didn't give any body for writing.");
+                        Trace.TraceInformation($"Thread {guid} has skipped ID {att.Key} according to the given IDs list");
+                        //Since skipping is done quite fast, need to add a small delay
+                        Thread.Sleep(delayBetweenIDSkips);
                     }
                 }
                 else 
@@ -1328,6 +1427,7 @@ namespace SalesForceAttachmentsBackupTools
                 }
             }
             Trace.TraceInformation($"A worker {guid} has finished the work.");
+            return rowsBackedByThread;
         }
 
         /// <summary>
@@ -1887,7 +1987,7 @@ namespace SalesForceAttachmentsBackupTools
         public string ORCLEntryName { get; set; }
 
         [Option("pushtimeout", MetaValue = "120", Default = 120,
-            HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Please, set it to a bigger value if you'll get too many warnings in the log.")]
+            HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Set it to a bigger value if you'll get too many warnings in the log.")]
         public int PushTimeout { get; set; }
 
         [Option("retries", MetaValue ="3", Default = 3,
@@ -1895,8 +1995,12 @@ namespace SalesForceAttachmentsBackupTools
         public int RetriesNumber { get; set; }
         
         [Option("maxrows", MetaValue ="1000", Default = int.MaxValue,
-            HelpText ="Sets the maximal number of rows that one part of the back-up file could contain (>=1)")]
+            HelpText = "Sets the maximal number of rows that one part of the back-up file could contain (>=1)")]
         public int MaxRowsInAPart { get; set; }
+
+        [Option("idstorestore", MetaValue ="D:\\restore.ids",
+            HelpText = "A list of IDs to be restored in write mode. A CSV file with only one column - \"ID\". If left empty all the IDs are restored")]
+        public string PathToWriteIDs { get; set; }
     }
 
     enum SFObjectsWithAttachments
@@ -1925,7 +2029,9 @@ namespace SalesForceAttachmentsBackupTools
         NothingToReadError = -6,
         SourceFileDoesNorExistsError = -7,
         TargetDBConnectionError = -8,
-        UnknownError = -999,
-        ObjectListError = -9
+        ObjectListError = -9,
+        IDFileWrongFormatError = -10,
+        OpenIDFileError = -11,
+        UnknownError = -999
     }
 }

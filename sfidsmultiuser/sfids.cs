@@ -462,8 +462,9 @@ namespace RepresentativeSubset
                     ratiosDeltas[i] = new KeyValuePair<float, float>(ratios[i], (float)NumberOfRecords - (ReturnValue.Length * ratios[i]));
                 }
 
-                float bestRatio = ratiosDeltas.Where(l => Math.Abs(l.Value) == ratiosDeltas.ToList().Min(t => Math.Abs(t.Value))).First().Key;
-                ReturnValue = Quarter(Shuffle(ReturnValue), bestRatio) as T[];
+                //float bestRatio = ratiosDeltas.Where(l => Math.Abs(l.Value) == ratiosDeltas.ToList().Min(t => Math.Abs(t.Value))).First().Key;
+                //ReturnValue = Quarter(Shuffle(ReturnValue), bestRatio) as T[];
+                ReturnValue = Quarter(Shuffle(ReturnValue), Math.Min((double)SubsetPercentage / 100, (double)MinNumber / ReturnValue.Length)) as T[];
             }
 
             return ReturnValue;
@@ -503,7 +504,7 @@ namespace RepresentativeSubset
             List<T> lt = OriginalSubset.ToList<T>();
             T[] res = new T[(int)(lt.Count * ratio)];
             res[0] = lt[0];
-            for (int i = 1; i < lt.Count * ratio; i++)
+            for (int i = 1; i < (int)(lt.Count * ratio); i++)
             {
                 res[i] = lt[(int)(i / ratio - 1)];
             }
