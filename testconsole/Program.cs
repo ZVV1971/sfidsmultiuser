@@ -1192,7 +1192,7 @@ namespace SalesForceAttachmentsBackupTools
 
                                                     con.Close();
                                                 }         //Of using Oracle connection
-                                                //Release the semphore and decrease its counter so as the others thread
+                                                //Release the semaphore and decrease its counter so as the others threads
                                                 //Could enter it and start execution
                                                 slim.Release();
                                             }));           //Of the Async lambda method
@@ -1227,8 +1227,6 @@ namespace SalesForceAttachmentsBackupTools
                         }
                         else
                         {
-                            //Taking a 5 seconds nap to let the uploading threads that did return though didn't actually finished uploading finish their work
-                            Thread.Sleep(5000);
                             //Doing check of the number of uploaded rows
                             Trace.TraceInformation($"Thread {guid} is counting the number of rows uploaded into Oracl DB from {currObject}");
                             using (OracleConnection con = new OracleConnection())
