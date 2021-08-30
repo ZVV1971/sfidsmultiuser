@@ -81,7 +81,7 @@ namespace SalesForceAttachmentsBackupTools
                 (Options opt) =>
                 {
                     if (opt.RetriesNumber >= 0 && opt.RetriesNumber <= 10) numberOfRetries = opt.RetriesNumber;
-                    pushTimeOut = opt.PushTimeout;
+                    pushTimeOut = 0;// opt.PushTimeout;
                     domainName = opt.SalesForceDomain;
                     groupName = opt.GroupName;
                     entryName = opt.EntryName;
