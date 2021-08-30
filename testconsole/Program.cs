@@ -81,7 +81,7 @@ namespace SalesForceAttachmentsBackupTools
                 (Options opt) =>
                 {
                     if (opt.RetriesNumber >= 0 && opt.RetriesNumber <= 10) numberOfRetries = opt.RetriesNumber;
-                    pushTimeOut = 0;// opt.PushTimeout;
+                    pushTimeOut = opt.PushTimeout;
                     domainName = opt.SalesForceDomain;
                     groupName = opt.GroupName;
                     entryName = opt.EntryName;
@@ -495,7 +495,6 @@ namespace SalesForceAttachmentsBackupTools
                     }
                     listOfIds = jsonParseResult.Item1.ToList<string>();
                     listOfNonSensitivePairs = jsonParseResult.Item2;
-                    List<Task> uploadTasks = new List<Task>();
 
                     //Add prefix to the dictionary
                     salesForceSID.Add("prefix", prefix);
@@ -510,10 +509,9 @@ namespace SalesForceAttachmentsBackupTools
                         tasks.Add(Task.Run(
                             () => doWork(listOfIds, salesForceSID, credentialsDict.Where(k => k.Key.Equals("ORCLConnectionString"))
                                 .ToDictionary(k=>k.Key, k=>k.Value),
-                            listOfNonSensitivePairs, uploadTasks)));
+                            listOfNonSensitivePairs)));
                     }
                     Task.WaitAll(tasks.ToArray());
-                    Trace.TraceInformation($"Wating for {uploadTasks.Count(t => (!t.IsCompleted && !t.IsFaulted && !t.IsFaulted))} upload tasks to finish");
                     break;
                 default:
                     break;
@@ -760,7 +758,7 @@ namespace SalesForceAttachmentsBackupTools
         /// <param name="uploadTasks">the list of tasks started to upload the sensitive data in the RDB to be waited on after the worker thread has finished</param>
         /// <returns></returns>
         private static async Task doWork(ICollection<string> listOfIds, IDictionary<string, string> creds, IDictionary<string
-            , ProtectedString> ORCLcreds, JToken excludeFields, List<Task> uploadTasks)
+            , ProtectedString> ORCLcreds, JToken excludeFields)
         {
             SynchronizedIds psid = new SynchronizedIds();
             int currentId, initialSleep, numberOfRecords;
@@ -953,8 +951,8 @@ namespace SalesForceAttachmentsBackupTools
                         int runNumber = 0;
                         List<Task> idJobs = new List<Task>();
                         CancellationTokenSource source = new CancellationTokenSource();
-                        //will throttle the number of simultaneously running push tasks
-                        Semaphore slim = new Semaphore(3, 3, "semaphore_" + guid.ToString("N"));
+
+                        DataTable bulkData = new DataTable();
                         //For every batch (run)
                         do {
                             bool commaFlag = false;
@@ -1065,10 +1063,9 @@ namespace SalesForceAttachmentsBackupTools
                                 }
                             }
 
-                            DataTable bulkData = new DataTable();
-
                             //Run the process getting the data in a separate thread
-                            idJobs.Add(Task.Run(async () =>                                {
+                            idJobs.Add(Task.Run(async () =>
+                            {
                                 int iniSleep = 3;
                                 int rnNumber = runNumber;
                                 HttpResponseMessage jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query")
@@ -1108,101 +1105,23 @@ namespace SalesForceAttachmentsBackupTools
                                         //in one batch
                                         jobresp = await ReadFromSalesForce(new Uri(creds["serverUrl"] + "/jobs/query/" + jobInfo["id"] + "/results?maxRecords=10000")
                                             , creds, HttpMethod.Get, accepts: "txt/csv");
-                                        
-                                        try
+
+                                        DataTable dt;
+                                        using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
+                                        using (CsvReader csv = new CsvReader(inputStreamReader,
+                                        new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
+                                        using (CsvDataReader dr = new CsvDataReader(csv))
                                         {
-                                            Trace.TraceInformation($"Thread {guid} is pushing the batch #{rnNumber} of the {currObject} to the Oracle instance");
-                                            uploadTasks.Add(Task.Run(async () =>
-                                            {
-                                                slim.WaitOne();
-                                                using (OracleConnection con = new OracleConnection())
-                                                {
-                                                    con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
-                                                    con.Open();
-                                                    using (StreamReader inputStreamReader = new StreamReader(await jobresp.Content.ReadAsStreamAsync()))
-                                                    using (CsvReader csv = new CsvReader(inputStreamReader,
-                                                    new CsvConfiguration(CultureInfo.InvariantCulture) { Delimiter = "|", NewLine = "\r\n" }))
-                                                    using (CsvDataReader dr = new CsvDataReader(csv))
-                                                    {
-                                                        DataTable dt = new DataTable();
-                                                        dt.Load(dr);
-                                                        using (OracleBulkCopy bulkCopy = new OracleBulkCopy(con)
-                                                            {
-                                                                DestinationTableName = $"{tableName}",
-                                                                BulkCopyTimeout = pushTimeOut,
-                                                                NotifyAfter = dt.Rows.Count
-                                                            })
-                                                        {
-                                                            //Create column mappings based on their indices
-                                                            for (int i = 0; i < dt.Columns.Count; i++)
-                                                            {
-                                                                bulkCopy.ColumnMappings.Add(i, i);
-                                                            }
-                                                            
-                                                            //Add a notifier event handler 
-                                                            bulkCopy.OracleRowsCopied += new OracleRowsCopiedEventHandler(OnRowsCopied);
-
-                                                            //Retries counter
-                                                            int k = 0;
-                                                            do
-                                                            {
-                                                                try
-                                                                {
-                                                                    bulkCopy.WriteToServer(dt);
-                                                                    k = numberOfRetries + 1;
-                                                                }
-                                                                catch (AggregateException aex)
-                                                                {
-                                                                    if (aex.InnerException is OracleException)
-                                                                    {
-                                                                        Trace.TraceWarning($"Thread {guid} has exceeded time limit to push batch #{rnNumber} of the {currObject}" +
-                                                                            $"\nTrying to push the data once again with the double timeout");
-                                                                        bulkCopy.BulkCopyTimeout = pushTimeOut * 3;
-                                                                    }
-                                                                }
-                                                                catch (OracleException oex)
-                                                                {
-                                                                    Trace.TraceWarning($"Thread {guid} has exceeded time limit to push batch #{rnNumber} of the {currObject}" +
-                                                                        $"\nTrying to push the data once again with the tripple timeout");
-                                                                    Trace.TraceWarning($"Exception was {oex.Message}");
-                                                                    bulkCopy.BulkCopyTimeout = pushTimeOut * 3;
-                                                                    k++;
-                                                                }
-                                                                catch (Exception ex)
-                                                                {
-                                                                    if (ex.InnerException is OracleException)
-                                                                    {
-                                                                        Trace.TraceWarning($"Thread {guid} has exceeded time limit to push batch #{rnNumber} of the {currObject}" +
-                                                                            $"\nTrying to push the data once again with the tripple timeout");
-                                                                        bulkCopy.BulkCopyTimeout = pushTimeOut * 3;
-                                                                        k++;
-                                                                    }
-                                                                    else
-                                                                    {
-                                                                        Trace.TraceError($"Thread {guid} has caught an Oracle exception the batch #{rnNumber} of the {currObject} has been canceled");
-                                                                        Trace.TraceWarning($"\nException was {ex.Message}");
-                                                                        k = numberOfRetries + 1;
-                                                                    }
-                                                                }
-                                                            } while (k < numberOfRetries);
-                                                            bulkCopy.Close();
-                                                        } //Of using bulkcopy
-
-                                                    }     //Of using CsvReader
-
-                                                    con.Close();
-                                                }         //Of using Oracle connection
-                                                //Release the semaphore and decrease its counter so as the others threads
-                                                //Could enter it and start execution
-                                                slim.Release();
-                                            }));           //Of the Async lambda method
+                                            dt = new DataTable();
+                                            dt.Load(dr, LoadOption.PreserveChanges);
                                         }
-                                        catch (Exception ex)
+                                        
+                                        lock (bulkData)
                                         {
-                                            Trace.TraceError("An exception has occured");
-#if TRACE
-                                            Trace.TraceError(ex.Message);
-#endif
+                                            Trace.TraceInformation($"Thread {guid} has acquired the lock and is merging the results of the {rnNumber} batch into the bulk DataTable for the {currObject}");
+                                            bulkData.Merge(dt, false, MissingSchemaAction.Add);
+                                            bulkData.AcceptChanges();
+                                            Trace.TraceInformation($"Thread {guid} has merged the results of the {rnNumber} for the {currObject}");
                                         }
                                     }
                                     else // Job is NOT complete
@@ -1221,6 +1140,80 @@ namespace SalesForceAttachmentsBackupTools
                         } while (needsToSubset && indexOfId < mixedIds.Count);
                         Trace.TraceInformation($"Thread {guid} is waiting for all runs ({runNumber}) to finish");
                         Task.WaitAll(idJobs.ToArray());
+
+                        Trace.TraceInformation($"Thread {guid} starts upload of the data of the {currObject} into Oracle instance");
+                        using (OracleConnection con = new OracleConnection())
+                        {
+                            con.ConnectionString = $"{ORCLcreds["ORCLConnectionString"].ReadString()}";
+                            con.Open();
+                            using (OracleBulkCopy bulkCopy = new OracleBulkCopy(con)
+                            {
+                                DestinationTableName = $"{tableName}",
+                                BulkCopyTimeout = pushTimeOut,
+                                NotifyAfter = 5000,
+                                BulkCopyOptions = OracleBulkCopyOptions.UseInternalTransaction,
+                                BatchSize = 5000
+                            })
+                            {
+                                //Add a notifier event handler 
+                                bulkCopy.OracleRowsCopied += new OracleRowsCopiedEventHandler(OnRowsCopied);
+                                //Create column mappings based on their indices
+                                for (int i = 0; i < bulkData.Columns.Count; i++)
+                                {
+                                    bulkCopy.ColumnMappings.Add(i, i);
+                                }
+                                //Retries counter
+                                int k = 0;
+                                do
+                                {
+                                    try
+                                    {
+                                        bulkCopy.WriteToServer(bulkData);
+                                        break;
+                                    }
+                                    catch (AggregateException aex)
+                                    {
+                                        if (aex.InnerException is OracleException)
+                                        {
+                                            Trace.TraceWarning($"Thread {guid} has exceeded time limit to push the {currObject}" +
+                                                $"\nTrying to push the data once again with the double timeout");
+                                            bulkCopy.BulkCopyTimeout = pushTimeOut * 3;
+                                            k++;
+                                        }
+                                    }
+                                    catch (OracleException oex)
+                                    {
+                                        Trace.TraceWarning($"Thread {guid} has exceeded time limit to push the data of the {currObject}" +
+                                            $"\nTrying to push the data once again with the tripple timeout");
+#if TRACE
+                                        Trace.TraceWarning($"Exception was {oex.Message}");
+#endif
+                                        bulkCopy.BulkCopyTimeout = pushTimeOut * 3;
+                                        k++;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        if (ex.InnerException is OracleException)
+                                        {
+                                            Trace.TraceWarning($"Thread {guid} has exceeded time limit to push the data of the {currObject}" +
+                                                $"\nTrying to push the data once again with the tripple timeout");
+                                            bulkCopy.BulkCopyTimeout = pushTimeOut * 3;
+                                            k++;
+                                        }
+                                        else
+                                        {
+                                            Trace.TraceError($"Thread {guid} has caught an Oracle exception while pushing the data of the {currObject}. Pushing has been cancelled");
+#if TRACE
+                                            Trace.TraceWarning($"\nException was {ex.Message}");
+#endif
+                                            break;
+                                        }
+                                    }
+                                } while (k < numberOfRetries);
+                                bulkCopy.Close();
+                            }
+                        }
+
                         if (idJobs.Count(t=>t.IsCanceled || t.IsFaulted) != 0)
                         {
                             Trace.TraceError($"Thread {guid} has got {idJobs.Count(t => t.IsCanceled || t.IsFaulted)} batches not-pushed");
