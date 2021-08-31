@@ -1,4 +1,5 @@
-﻿using AsyncSalesForceAttachments;
+﻿using AutoUpdate;
+using AsyncSalesForceAttachments;
 using CommandLine;
 using KeePassLib;
 using KeePassLib.Collections;
@@ -75,6 +76,12 @@ namespace SalesForceAttachmentsBackupTools
         [MTAThread]
         static async Task Main(string[] args)
         {
+            // setup the auto update, and exit if there was an update
+            // change the line below to your github repo where "AutoUpdate" is (YourAppName)/(YourRepoName)
+            Updater.GitHubRepo = "/ZVV1971/sfidsmultiuser";
+            if (Updater.AutoUpdate(args))
+                return;
+
             //Parse the arguments
             int result = Parser.Default.ParseArguments<Options>(args)
                 .MapResult(
