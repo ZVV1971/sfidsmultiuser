@@ -26,14 +26,14 @@ namespace AutoUpdate
 				for (var i = 0; i < names.Length; i++)
 				{
 					var name = names[i];
-					if (name.Contains(".ZZupdater0."))
-					{
-						try
-						{
-							File.Delete(name.Substring(name.IndexOf('.') + 1));
-						}
-						catch { }
-					}
+					//if (name.Contains(".ZZupdater0."))
+					//{
+					//	try
+					//	{
+					//		File.Delete(name.Substring(name.IndexOf('.') + 1));
+					//	}
+					//	catch { }
+					//}
 				}
 			}
 			return false;
@@ -118,7 +118,7 @@ namespace AutoUpdate
 			for (var i = 0;i<names.Length;i++)
 			{
 				var name = names[i];
-				if(name.Contains(".ZZupdater0."))
+				if(name.Contains("ZZupdater0."))
 				{
 					var respath = name;
 					if(string.IsNullOrEmpty(exename) && name.EndsWith(".exe"))

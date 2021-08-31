@@ -169,16 +169,17 @@
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <ProjectExtensions>
     <VisualStudio>
-      <UserProperties BuildVersion_BuildVersioningStyle="None.None.None.Increment" BuildVersion_StartDate="2000/1/1" BuildVersion_UpdateFileVersion="True" BuildVersion_UpdateAssemblyVersion="True" BuildVersion_UseUniversalClock="False" BuildVersion_DetectChanges="True" BuildVersion_AssemblyInfoFilename="Properties\AssemblyInfo.cs" BuildVersion_UseGlobalSettings="False" />
+      <UserProperties BuildVersion_UseGlobalSettings="False" BuildVersion_AssemblyInfoFilename="Properties\AssemblyInfo.cs" BuildVersion_DetectChanges="True" BuildVersion_UseUniversalClock="False" BuildVersion_UpdateAssemblyVersion="True" BuildVersion_UpdateFileVersion="True" BuildVersion_StartDate="2000/1/1" BuildVersion_BuildVersioningStyle="None.None.None.Increment" />
     </VisualStudio>
   </ProjectExtensions>
   <PropertyGroup>
-    <PostBuildEvent>IF $(ConfigurationName) == Release COPY /Y $(TargetPath) "C:\Users\Uladzimir_Zakharenka\source\repos\nbs-mask\scripts\iics_attachments\"$(TargetFileName) /Y
-IF $(ConfigurationName) == Release powershell.exe "%24v=%28[Reflection.AssemblyName]::GetAssemblyName%28'$(TargetPath)'%29.Version%29%3B Compress-Archive -DestinationPath $(TargetDir)'sfidsmultiuser.Refresh.v'%24v'.zip' -Path $(TargetDir)*.dll"
-IF $(ConfigurationName) == Release powershell.exe "%24v=%28[Reflection.AssemblyName]::GetAssemblyName%28'$(TargetPath)'%29.Version%29%3B Compress-Archive -DestinationPath $(TargetDir)'sfidsmultiuser.Refresh.v'%24v'.zip' -Path $(TargetDir)*.exe -Update"</PostBuildEvent>
+    <PostBuildEvent>IF $(ConfigurationName) == Release powershell.exe "%24v=%28[Reflection.AssemblyName]::GetAssemblyName%28'$(TargetPath)'%29.Version%29%3B Compress-Archive -DestinationPath $(TargetDir)'sfidsmultiuser.Refresh.v'%24v'.zip' -Path $(TargetDir)*.dll -Update"
+IF $(ConfigurationName) == Release powershell.exe "%24v=%28[Reflection.AssemblyName]::GetAssemblyName%28'$(TargetPath)'%29.Version%29%3B Compress-Archive -DestinationPath $(TargetDir)'sfidsmultiuser.Refresh.v'%24v'.zip' -Path $(TargetDir)*.exe -Update%3BStart-Sleep -s 3"
+IF $(ConfigurationName) == Release powershell.exe "Copy-Item $(TargetDir)'\%2A.zip' 'C:\Users\Uladzimir_Zakharenka\source\repos\nbs-mask\scripts\iics_attachments\'"</PostBuildEvent>
   </PropertyGroup>
   <PropertyGroup>
     <PreBuildEvent>IF $(ConfigurationName) == Debug COPY /Y "$(ProjectDir)App.Debug.config" "$(ProjectDir)App.config"
-IF $(ConfigurationName) == Release COPY /Y "$(ProjectDir)App.Release.config" "$(ProjectDir)App.config"</PreBuildEvent>
+IF $(ConfigurationName) == Release COPY /Y "$(ProjectDir)App.Release.config" "$(ProjectDir)App.config"
+IF $(ConfigurationName) == Release del $(TargetDir)*.zip.</PreBuildEvent>
   </PropertyGroup>
 </Project>

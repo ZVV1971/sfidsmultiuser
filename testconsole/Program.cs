@@ -1984,9 +1984,9 @@ namespace SalesForceAttachmentsBackupTools
             HelpText = "Gives the name of the entry where the ORCL credentials must be looked for. Must contain DataSource description.")]
         public string ORCLEntryName { get; set; }
 
-        [Option("pushtimeout", MetaValue = "120", Default = 120,
-            HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Set it to a bigger value if you'll get too many warnings in the log.")]
-        public int PushTimeout { get; set; }
+        //[Option("pushtimeout", MetaValue = "120", Default = 120,
+        //    HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Set it to a bigger value if you'll get too many warnings in the log.")]
+        //public int PushTimeout { get; set; }
 
         [Option("retries", MetaValue ="3", Default = 3,
             HelpText = "Sets the number of retries for push of the data batches; 1 - 10")]
