@@ -1,4 +1,5 @@
-﻿using AsyncSalesForceAttachments;
+﻿using AutoUpdate;
+using AsyncSalesForceAttachments;
 using CommandLine;
 using KeePassLib;
 using KeePassLib.Collections;
@@ -75,6 +76,12 @@ namespace SalesForceAttachmentsBackupTools
         [MTAThread]
         static async Task Main(string[] args)
         {
+            // setup the auto update, and exit if there was an update
+            // change the line below to your github repo where "AutoUpdate" is (YourAppName)/(YourRepoName)
+            Updater.GitHubRepo = "/ZVV1971/sfidsmultiuser";
+            if (Updater.AutoUpdate(args))
+                return;
+
             //Parse the arguments
             int result = Parser.Default.ParseArguments<Options>(args)
                 .MapResult(
@@ -994,6 +1001,7 @@ namespace SalesForceAttachmentsBackupTools
                                     commaFlag = true;
                                 }
                                 limitedWhereCondition.Append(")");
+                                if (limitedWhereCondition.Length == " WHERE Id IN()".Length) limitedWhereCondition.Clear();
                                 runNumber++;
                                 Trace.TraceInformation($"Thread {guid} is preparing a query for the run #{runNumber}");
                                 initialSleep = 3;
@@ -1132,7 +1140,8 @@ namespace SalesForceAttachmentsBackupTools
                                 }
                                 else
                                 {
-                                    Trace.TraceError($"Thread {guid} has caught an error creating Bulk job for the {currObject}");
+                                    Trace.TraceError($"Thread {guid} has caught an error creating Bulk job for the {currObject} with the code {jobresp.StatusCode}" +
+                                        $"\n{JsonConvert.SerializeObject(jobJsonObj)}");
                                     source.Cancel();
                                 }
                             }, source.Token) //Per-run task defined
@@ -1977,9 +1986,9 @@ namespace SalesForceAttachmentsBackupTools
             HelpText = "Gives the name of the entry where the ORCL credentials must be looked for. Must contain DataSource description.")]
         public string ORCLEntryName { get; set; }
 
-        [Option("pushtimeout", MetaValue = "120", Default = 120,
-            HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Set it to a bigger value if you'll get too many warnings in the log.")]
-        public int PushTimeout { get; set; }
+        //[Option("pushtimeout", MetaValue = "120", Default = 120,
+        //    HelpText ="Sets the initial timeout value (seconds) for the packages to be pushed to the ORCL instance. Set it to a bigger value if you'll get too many warnings in the log.")]
+        //public int PushTimeout { get; set; }
 
         [Option("retries", MetaValue ="3", Default = 3,
             HelpText = "Sets the number of retries for push of the data batches; 1 - 10")]
