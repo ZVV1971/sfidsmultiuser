@@ -1134,7 +1134,8 @@ namespace SalesForceAttachmentsBackupTools
                                     }
                                     else // Job is NOT complete
                                     {
-                                        Trace.TraceError($"Thread {guid} has caught an error processing Bulk job {jobInfo?["id"]} for the {currObject} with the state {jobInfo["state"]}");
+                                        Trace.TraceError($"Thread {guid} has caught an error processing Bulk job {jobInfo?["id"]} for the {currObject} with the state {jobInfo["state"]}" +
+                                             $"\n{JsonConvert.SerializeObject(jobJsonObj)}");
                                         source.Cancel();
                                     }
                                 }
