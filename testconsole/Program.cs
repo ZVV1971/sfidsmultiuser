@@ -1001,6 +1001,7 @@ namespace SalesForceAttachmentsBackupTools
                                     commaFlag = true;
                                 }
                                 limitedWhereCondition.Append(")");
+                                if (limitedWhereCondition.Length == " WHERE Id IN()".Length) limitedWhereCondition.Clear();
                                 runNumber++;
                                 Trace.TraceInformation($"Thread {guid} is preparing a query for the run #{runNumber}");
                                 initialSleep = 3;
@@ -1139,7 +1140,8 @@ namespace SalesForceAttachmentsBackupTools
                                 }
                                 else
                                 {
-                                    Trace.TraceError($"Thread {guid} has caught an error creating Bulk job for the {currObject}");
+                                    Trace.TraceError($"Thread {guid} has caught an error creating Bulk job for the {currObject} with the code {jobresp.StatusCode}" +
+                                        $"\n{JsonConvert.SerializeObject(jobJsonObj)}");
                                     source.Cancel();
                                 }
                             }, source.Token) //Per-run task defined
