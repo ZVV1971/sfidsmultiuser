@@ -1022,25 +1022,40 @@ namespace SalesForceAttachmentsBackupTools
                             if (runNumber <= 1)
                             {
                                 //Continue to compose a SQL query to create a table
-                                foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True") 
-                                        && !t["type"].ToString().Equals("boolean")
-                                        && !t["type"].ToString().Equals("picklist")
-                                        && !t["type"].ToString().Equals("reference")
-                                        && !t["type"].ToString().Equals("double"))
-                                    //.Take(200)
-                                        .Select(o => o["name"].ToString())
-                                        .Except((excludeFields ?? JToken.Parse("{}"))
-                                                //Exclude the non-sensitive fields for the specific Object
-                                                .Select(t => t[currObject]?.ToString())
-                                                .Where(t => t != null)
-                                                //Exclude the non-sensitive fields common to all and Objects
-                                                .Concat((excludeFields ?? JToken.Parse("{}"))
-                                                .Select(t => t["AnyObject"]?.ToString())
-                                                .Where(t => t != null))
-                                            )
-                                        )
+                                //foreach (string s in arrFields.Where(t => t["updateable"].ToString().Equals("True") 
+                                //        && !t["type"].ToString().Equals("boolean")
+                                //        && !t["type"].ToString().Equals("picklist")
+                                //        && !t["type"].ToString().Equals("reference")
+                                //        && !t["type"].ToString().Equals("double"))
+                                //        .Select(o => o["name"].ToString())
+                                //        .Except((excludeFields ?? JToken.Parse("{}"))
+                                //                //Exclude the non-sensitive fields for the specific Object
+                                //                .Select(t => t[currObject]?.ToString())
+                                //                .Where(t => t != null)
+                                //                //Exclude the non-sensitive fields common to all and Objects
+                                //                .Concat((excludeFields ?? JToken.Parse("{}"))
+                                //                .Select(t => t["AnyObject"]?.ToString())
+                                //                .Where(t => t != null))
+                                //            )
+                                //        )
+                                //{
+                                //    createSQL.Append($",\"{s.ToUpper()}\" VARCHAR2(4000)");
+                                //}
+                                //createSQL.Append(")");
+
+                                foreach (var e in arrFields.Where(t => t["updateable"].ToString().Equals("True") 
+                                            && !t["type"].ToString().Equals("boolean") 
+                                            && !t["type"].ToString().Equals("picklist") 
+                                            && !t["type"].ToString().Equals("reference") 
+                                            && !t["type"].ToString().Equals("double"))
+                                        .Where(t => !(excludeFields ?? JToken.Parse("{}"))
+                                            .Where(h => h[currObject] != null)
+                                            .Concat(excludeFields ?? JToken.Parse("{}"))
+                                            .Where(f => f?["AnyObject"] != null)
+                                            .Select(d => d.Values().FirstOrDefault())
+                                        .Contains(t["name"])))
                                 {
-                                    createSQL.Append($",\"{s.ToUpper()}\" VARCHAR2(4000)");
+                                    createSQL.Append($",\"{e["name"].ToString().ToUpper()}\" {(e["type"].ToString().Equals("textarea") ? "CLOB" : "VARCHAR2(4000)")}");
                                 }
                                 createSQL.Append(")");
 
