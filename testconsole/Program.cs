@@ -165,6 +165,7 @@ namespace SalesForceAttachmentsBackupTools
                         }
                     }
                     Trace.TraceInformation("Arguments have been successfully parsed");
+                    Trace.TraceInformation(args.ToList().Aggregate("", (c, n) => $"{c} {n}"));
                     return 1;
                 },
                 (IEnumerable<Error> errs) =>
@@ -574,7 +575,7 @@ namespace SalesForceAttachmentsBackupTools
                 }
                 catch
                 {
-                    Trace.TraceWarning("Wrong path to the JSON file is given!");
+                    Trace.TraceWarning("Wrong path to the JSON file is given or invalid JSON!");
                 }
             }
  
@@ -961,30 +962,41 @@ namespace SalesForceAttachmentsBackupTools
 
                         DataTable bulkData = new DataTable();
                         //For every batch (run)
+
+                        var exc = arrFields.Where(t => t["updateable"].ToString().Equals("True")
+                                        && !t["type"].ToString().Equals("boolean")
+                                        && !t["type"].ToString().Equals("picklist")
+                                        && !t["type"].ToString().Equals("reference")
+                                        && !t["type"].ToString().Equals("double")
+                                        && !t["type"].ToString().Equals("multipicklist"))
+                                //Include all the references
+                                .Concat((excludeFields ?? JToken.Parse("{}")
+                                .Where(x => x["type"].ToString().Equals("reference"))))
+                                .Where(d => !(excludeFields as JArray ?? JToken.Parse("{}") as JArray)
+                                    .Descendants()
+                                    .OfType<JProperty>()
+                                    .Where(p => p.Name == "AnyObject" || p.Name == currObject)
+                                    .Values()
+                                    .Distinct()
+                                    .Contains(d["name"]))
+                                    //Return only name and type since the others are not required
+                                    .Select(s => new { name = s["name"], type = s["type"] })
+                                    //Remove nulls from the collection (?Where did they come from?)
+                                    .Where(s => s.name != null);
+#if TRACE
+                        Trace.TraceInformation($"There are {exc.Count()} elements after exclusion");
+#endif
+
                         do {
                             bool commaFlag = false;
                             StringBuilder limitedWhereCondition = new StringBuilder();
                             StringBuilder fieldsList = new StringBuilder("SELECT Id,"
-                                + arrFields.Where(t => t["updateable"].ToString().Equals("True")
-                                        && !t["type"].ToString().Equals("boolean")
-                                        && !t["type"].ToString().Equals("picklist")
-                                        && !t["type"].ToString().Equals("reference")
-                                        && !t["type"].ToString().Equals("double"))
-                                //Include all the references
-                                .Concat(arrFields.Where(x => x["type"].ToString().Equals("reference")))
-                                    .Select(o => o["name"].ToString())
-                                    //Exclude the non-sensitive fileds pecific to the current Object
-                                    .Except((excludeFields ?? JToken.Parse("{}"))
-                                        .Select(t => t[currObject]?.ToString())
-                                        .Where(t => t != null)
-                                        //Exclude the non-sensitive fields common to all Objects
-                                        .Concat((excludeFields ?? JToken.Parse("{}"))
-                                        .Select(t => t["AnyObject"]?.ToString())
-                                        .Where(t => t != null))
-                                        )
-                                    .Aggregate("", (c, n) => $"{c},{n}")
+                                + exc.Select(x=>x.name).Aggregate("", (c, n) => $"{c},{n}")
                                     .TrimStart(',')
                                     + " FROM " + currObject);
+#if TRACE
+                            Trace.TraceInformation(fieldsList.ToString());
+#endif
                             if (needsToSubset)
                             {
                                 //define the length of its variable fields parts
@@ -1022,25 +1034,15 @@ namespace SalesForceAttachmentsBackupTools
                             //Run table creation task in an async mode with no await only in the first batch
                             if (runNumber <= 1)
                             {
-                                foreach (var e in arrFields.Where(t => t["updateable"].ToString().Equals("True") 
-                                            && !t["type"].ToString().Equals("boolean") 
-                                            && !t["type"].ToString().Equals("picklist") 
-                                            && !t["type"].ToString().Equals("reference") 
-                                            && !t["type"].ToString().Equals("double"))
-                                //Include all the references
-                                .Concat(arrFields.Where(x => x["type"].ToString().Equals("reference")))
-                                        .Where(t => !(excludeFields ?? JToken.Parse("{}"))
-                                            .Where(h => h[currObject] != null)
-                                            .Concat(excludeFields ?? JToken.Parse("{}"))
-                                            .Where(f => f?["AnyObject"] != null)
-                                            .Select(d => d.Values().FirstOrDefault())
-                                        .Contains(t["name"])))
+                                foreach (var e in exc)
                                 {
                                     //define whether the field is of textarea type and then force it to store in CLOB
-                                    createSQL.Append($",\"{e["name"].ToString().ToUpper()}\" {(e["type"].ToString().Equals("textarea") ? "CLOB" : "VARCHAR2(4000)")}");
+                                    createSQL.Append($",\"{e.name.ToString().ToUpper()}\" {(e.type.ToString().Equals("textarea") ? "CLOB" : "VARCHAR2(4000)")}");
                                 }
                                 createSQL.Append(")");
-
+#if TRACE
+                                Trace.TraceInformation(createSQL.ToString());
+#endif
                                 Trace.TraceInformation($"Thread {guid} creates a table in the Oracle instance to hold the data of the {currObject}");
                                 ORCLTask = Task.Run(() =>
                                 {
@@ -2004,8 +2006,7 @@ namespace SalesForceAttachmentsBackupTools
     enum SFObjectsWithAttachments
     {
         Attachment,
-        Document,
-        Note
+        Document
     }
 
     enum WorkingModes

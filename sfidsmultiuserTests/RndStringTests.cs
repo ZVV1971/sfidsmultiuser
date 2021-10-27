@@ -1,5 +1,6 @@
 ﻿using AsyncSalesForceAttachments;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -473,6 +474,74 @@ namespace MinSizeQueueTests
             tasks.Add(enq);
             Task.WaitAll(tasks.ToArray<Task>());
             Assert.AreEqual(eventList.Count, numberOfRows);
+        }
+    }
+}
+
+namespace JsonNotInTests
+{
+    [TestClass]
+    public class json_notin
+    {
+        string path_to_account_fields = "C:\\Users\\Uladzimir_Zakharenka\\source\\repos\\ZVV1971\\sfidsmultiuser\\testconsole\\Account_fields.json";
+        string path_to_objects = "C:\\Users\\Uladzimir_Zakharenka\\source\\repos\\ZVV1971\\sfidsmultiuser\\testconsole\\ObjectsToExclude.json";
+        JArray JFields;
+        JArray JObjects;
+
+        [TestInitialize]
+        public void FillArrays()
+        {
+                JFields = JArray.Parse(File.ReadAllText(path_to_account_fields));
+                JObjects = JObject.Parse(File.ReadAllText(path_to_objects))["FieldsToExclude"] as JArray;
+        }
+
+        [TestMethod]
+        public void CheckNumberOfFields()
+        {
+            Assert.AreEqual(JFields.Count, 478);
+        }
+
+        [TestMethod]
+        public void CheckNumberofFieldsBeforeExclusion()
+        {
+            Assert.AreEqual(249,
+                JFields.Where(t => t["updateable"].ToString().Equals("True")
+                                        && !t["type"].ToString().Equals("boolean")
+                                        && !t["type"].ToString().Equals("picklist")
+                                        && !t["type"].ToString().Equals("reference")
+                                        && !t["type"].ToString().Equals("double"))
+                                //Include all the references
+                                .Concat(JFields.Where(x => x["type"].ToString().Equals("reference"))).Count()
+                );
+        }
+
+        [TestMethod]
+        public void CheckNumberOfFieldsToExcludeInAccountObject()
+        {
+            var an = JObjects.Descendants().OfType<JProperty>().Where(p => p.Name == "AnyObject" || p.Name == "Account");
+
+            Assert.AreEqual(12,
+                an.Count()
+                );
+        }
+
+        [TestMethod]
+        public void CheckNumberofFieldsAfterExclusion()
+        {
+            var an = JObjects.Descendants().OfType<JProperty>().Where(p => p.Name == "AnyObject" || p.Name == "Account").Values().Distinct();
+            var bn = JFields.Where(t => t["updateable"].ToString().Equals("True")
+                                        && !t["type"].ToString().Equals("boolean")
+                                        && !t["type"].ToString().Equals("picklist")
+                                        && !t["type"].ToString().Equals("reference")
+                                        && !t["type"].ToString().Equals("double")
+                                        && !t["type"].ToString().Equals("multipicklist"))
+                                //Include all the references
+                                .Concat(JFields.Where(x => x["type"].ToString().Equals("reference")));
+            var cn = bn.Where(d => !an.Contains(d["name"])).Select(s=> new { name = s["name"], type = s["type"] });
+            Assert.AreEqual(242,
+                                bn.Where(x => !an.Contains(x["name"]))
+                                .Count()
+                );
         }
     }
 }

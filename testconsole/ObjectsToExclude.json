@@ -671,8 +671,6 @@
     { "Event": "RecurrenceDayOfWeekMask" },
     { "Event": "RecurrenceDayOfMonth" },
     { "Group": "Name" },
-    { "Lead": "AnnualRevenue" },
-    { "Lead": "NumberOfEmployees" },
     { "Organization-wide From Email Address": "DisplayName" },
     { "Organization": "Name" },
     { "Organization": "WebToCaseDefaultOrigin" },
