@@ -65,22 +65,23 @@
     <GenerateSerializationAssemblies>Off</GenerateSerializationAssemblies>
   </PropertyGroup>
   <PropertyGroup>
-    <ManifestCertificateThumbprint>5C2BF3025F9ECDF8DE7B0F50FC8A771358F804AF</ManifestCertificateThumbprint>
+    <ManifestCertificateThumbprint>0C97A6587E9C635587CBF0A721B55DC9E7B6C545</ManifestCertificateThumbprint>
   </PropertyGroup>
   <PropertyGroup>
-    <ManifestKeyFile>testconsole_TemporaryKey.pfx</ManifestKeyFile>
+    <ManifestKeyFile>AttachmentsBackUp_TemporaryKey.pfx</ManifestKeyFile>
   </PropertyGroup>
   <PropertyGroup>
     <GenerateManifests>true</GenerateManifests>
   </PropertyGroup>
   <PropertyGroup>
-    <SignManifests>true</SignManifests>
+    <SignManifests>false</SignManifests>
   </PropertyGroup>
   <PropertyGroup>
     <SignAssembly>true</SignAssembly>
   </PropertyGroup>
   <PropertyGroup>
-    <AssemblyOriginatorKeyFile>AttachmentBackUp_TemporaryKey.pfx</AssemblyOriginatorKeyFile>
+    <AssemblyOriginatorKeyFile>
+    </AssemblyOriginatorKeyFile>
   </PropertyGroup>
   <PropertyGroup>
     <TargetZone>LocalIntranet</TargetZone>
@@ -141,7 +142,6 @@
     <None Include="App.config" />
     <None Include="packages.config" />
     <None Include="Properties\app.manifest" />
-    <None Include="AttachmentBackUp_TemporaryKey.pfx" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\sfidsmultiuser\sfidsmultiuser.csproj">
