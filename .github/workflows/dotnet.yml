@@ -29,7 +29,7 @@ jobs:
       run: nuget restore
 
     - name: Install additional NuGet packages
-      run: dotnet tool install -g nbgv; nbgv install
+      run: dotnet tool install -g nbgv; nbgv install; nbgv get-version -v AssemblyVersion
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v1
