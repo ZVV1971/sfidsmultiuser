@@ -3,6 +3,9 @@
 
 name: .NET
 
+env:
+  VERSION_NUMBER : ''
+
 on:
   push:
     branches:
@@ -31,7 +34,7 @@ jobs:
       run: nuget restore
 
     - name: Install additional NuGet packages
-      run: dotnet tool install -g nbgv; nbgv install; nbgv get-version -v AssemblyVersion
+      run: dotnet tool install -g nbgv; nbgv install; $VERSION_NUMBER = 'nbgv get-version -v AssemblyVersion'
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v1
