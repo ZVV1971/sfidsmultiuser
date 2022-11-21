@@ -57,4 +57,4 @@ jobs:
         script: '$releasenumber = $(${env:GitBuildVersionSimple} + ".0"); Compress-Archive -Path .\testconsole\bin\Release\*.exe -DestinationPath $("Refresh.v" + $releasenumber + ".zip"); Compress-Archive -Path .\testconsole\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update; Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;'
       continue-on-error: true
     - run: ls *.zip
-    - run: gh release create  $(${env:GitBuildVersionSimple} + ".0") ./*.zip
+    - run: gh release create  $(${env:GitBuildVersionSimple} + ".0") ./$(${env:GitBuildVersionSimple} + ".0").zip
