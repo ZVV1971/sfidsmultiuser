@@ -43,10 +43,4 @@ jobs:
       run: dotnet build --no-restore --configuration Release
 
     - name: Test
-      run: ls; dotnet test --no-build --verbosity normal
-
-    - name: 'Upload Artifacts'
-      uses: actions/upload-artifact@v3
-      with:
-        name: my-artifact
-        path: ~/download/path
+      run: cd sfidsmultiuserTests; dotnet test --no-build --verbosity normal
