@@ -54,9 +54,4 @@ jobs:
         script: '$releasenumber = $(${env:GitBuildVersionSimple} + ".0"); Compress-Archive -Path .\testconsole\bin\Release\*.exe -DestinationPath $("Refresh.v" + $releasenumber + ".zip"); Compress-Archive -Path .\testconsole\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update; Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;'
       continue-on-error: true
     - run: ls *.zip
-
-    - name: 'Upload Artifacts'
-      uses: actions/upload-artifact@v3
-      with:
-        name: my-artifact
-        path: ~/download/path
+    - run: gh release create  $(${env:GitBuildVersionSimple} + ".0") ./*.zip
