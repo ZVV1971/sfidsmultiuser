@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "bug/**"
+      - "feature/**"
   pull_request:
   workflow_dispatch:
 
