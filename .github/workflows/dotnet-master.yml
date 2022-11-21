@@ -35,7 +35,7 @@ jobs:
       run: nuget restore
 
     - name: Install additional NuGet packages
-      run: dotnet tool install -g nbgv; nbgv install; $VERSION_NUMBER = nbgv get-version -v AssemblyVersion; echo $VERSION_NUMBER; ls
+      run: dotnet tool install -g nbgv; nbgv install; $VERSION_NUMBER = nbgv get-version -v AssemblyVersion; echo $VERSION_NUMBER;
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v1
@@ -51,13 +51,13 @@ jobs:
     - name: Test
       run: dotnet test --no-build --verbosity normal
       
-    - name Prepare ZIP Archive
-      uses: Amadevus/pwsh-script@v2
-      id: ZIPping-executables
+    - name: Prepare ZIP Archive
+      uses: Amadevus/pwsh-script@v2.0.3
       with:
         script: '$releasenumber = $VERSION_NUMBER; Compress-Archive -Path .\testconsole\bin\Release\*.exe -DestinationPath $("Refresh.v" + $releasenumber + ".zip"); Compress-Archive -Path .\testconsole\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update; Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;'
-     continue-on-error: true
-     run: echo '${{steps.ZIPping-executables.outputs.results }}'
+      continue-on-error: true
+    - run: echo '${{steps.ZIPping-executables.outputs.results }}'
+    - run: ls
 
     - name: 'Upload Artifacts'
       uses: actions/upload-artifact@v3
