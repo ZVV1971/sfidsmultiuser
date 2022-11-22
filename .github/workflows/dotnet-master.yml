@@ -34,19 +34,13 @@ jobs:
     - name: Restore NuGet packages
       run: nuget restore
 
-    - name: Install additional NuGet packages
-      run: dotnet tool install -g nbgv; nbgv install; nbgv get-version -v AssemblyVersion
-
     - name: Setup .NET
       uses: actions/setup-dotnet@v1
       with:
-        dotnet-version: 5.0.x
-
-    - name: Restore dependencies
-      run: dotnet restore
+        dotnet-version: 6.0.x
 
     - name: Build
-      run: dotnet build --no-restore --configuration Release
+      run: dotnet build --configuration Release
 
     - name: Test
       run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
