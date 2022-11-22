@@ -38,6 +38,9 @@ jobs:
       uses: actions/setup-dotnet@v1
       with:
         dotnet-version: 6.0.x
+        
+    - name: Check version
+      run: nbgv get-version
 
     - name: Build
       run: dotnet build --configuration Release
