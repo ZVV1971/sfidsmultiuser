@@ -46,6 +46,9 @@ namespace RepresentativeSubset.Tests
     [TestClass]
     public class ReprSubTests
     {
+        private int milisecsForLargeShuffle = 80000;
+        private int milisecsForLargeQuartering = 2000;
+
         [TestMethod("Test the outlayers of range of the percentange")]
         public void SetWrongPercentageReprSubset()
         {
@@ -100,7 +103,7 @@ namespace RepresentativeSubset.Tests
             
             watch.Stop();
 
-            Assert.IsTrue(watch.ElapsedMilliseconds <= 100, "The execution took {0} miliseconds", watch.ElapsedMilliseconds);
+            Assert.IsTrue(watch.ElapsedMilliseconds <= milisecsForLargeQuartering, "The execution took {0} miliseconds, but we expected {1}", watch.ElapsedMilliseconds, milisecsForLargeQuartering);
         }
 
         [TestMethod("Measure execution time for Shuffling for a comparatively big array ~13.000.000")]
@@ -116,7 +119,7 @@ namespace RepresentativeSubset.Tests
 
             watch.Stop();
 
-            Assert.IsTrue(watch.ElapsedMilliseconds <= 100, "The execution took {0} miliseconds", watch.ElapsedMilliseconds);
+            Assert.IsTrue(watch.ElapsedMilliseconds <= milisecsForLargeShuffle, "The execution took {0} miliseconds, but {1} was expected", watch.ElapsedMilliseconds, milisecsForLargeShuffle);
         }
 
         [TestMethod("Check number of returned records for a comparatively big array ~1.000.000")]
@@ -547,13 +550,13 @@ namespace JsonNotInTests
         [TestMethod]
         public void CheckNumberOfFields()
         {
-            Assert.AreEqual(JFields.Count, 478);
+            Assert.AreEqual(JFields.Count, 62);
         }
 
         [TestMethod]
         public void CheckNumberofFieldsBeforeExclusion()
         {
-            Assert.AreEqual(249,
+            Assert.AreEqual(34,
                 JFields.Where(t => t["updateable"].ToString().Equals("True")
                                         && !t["type"].ToString().Equals("boolean")
                                         && !t["type"].ToString().Equals("picklist")
@@ -569,7 +572,7 @@ namespace JsonNotInTests
         {
             var an = JObjects.Descendants().OfType<JProperty>().Where(p => p.Name == "AnyObject" || p.Name == "Account");
 
-            Assert.AreEqual(12,
+            Assert.AreEqual(2,
                 an.Count()
                 );
         }
@@ -587,7 +590,7 @@ namespace JsonNotInTests
                                 //Include all the references
                                 .Concat(JFields.Where(x => x["type"].ToString().Equals("reference")));
             var cn = bn.Where(d => !an.Contains(d["name"])).Select(s=> new { name = s["name"], type = s["type"] });
-            Assert.AreEqual(242,
+            Assert.AreEqual(32,
                                 bn.Where(x => !an.Contains(x["name"]))
                                 .Count()
                 );
