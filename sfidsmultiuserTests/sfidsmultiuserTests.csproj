@@ -63,9 +63,6 @@
     <Compile Include="RndStringTests.cs" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="packages.config" />
-  </ItemGroup>
-  <ItemGroup>
     <ProjectReference Include="..\sfidsmultiuser\sfidsmultiuser.csproj">
       <Project>{1ED12C8A-A895-4C80-9BA2-C0BF6E6ACBA4}</Project>
       <Name>sfidsmultiuser</Name>
