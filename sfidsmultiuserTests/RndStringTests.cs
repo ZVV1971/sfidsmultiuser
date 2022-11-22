@@ -46,7 +46,7 @@ namespace RepresentativeSubset.Tests
     [TestClass]
     public class ReprSubTests
     {
-        private int milisecsForLargeShuffle = 80000;
+        private int milisecsForLargeShuffle = 100000;
         private int milisecsForLargeQuartering = 2000;
 
         [TestMethod("Test the outlayers of range of the percentange")]
