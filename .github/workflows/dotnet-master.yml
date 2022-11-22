@@ -34,8 +34,8 @@ jobs:
     - name: Restore NuGet packages
       run: |
         nuget restore
-        nuget restore .\testconsole\packages.config
-        nuget restore .\stidsmultiuserTests\packages.config
+        nuget restore .\testconsole\packages.config -PackagesDirectory ..\packages
+        nuget restore .\sfidsmultiuserTests\packages.config -PackagesDirectory ..\packages
 
     #- name: Setup .NET
     #  uses: actions/setup-dotnet@v1
