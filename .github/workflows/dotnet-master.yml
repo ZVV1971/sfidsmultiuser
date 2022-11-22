@@ -48,15 +48,16 @@ jobs:
     - name: Build
       run: dotnet build --configuration Release
 
-    - name: Check Versions
-      run: cd .\testconsole\bin\Release\; Get-ChildItem -Filter A*.exe | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}; cd ..; cd ..; cd.. ; cd .\sfidsmultiuserTests\bin\Release\; Get-ChildItem -Filter s*r.dll | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
-    #- name: Test
-    #  run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
+    #- name: Check Versions
+    #  run: cd .\testconsole\bin\Release\; Get-ChildItem -Filter A*.exe | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}; cd ..; cd ..; cd.. ; cd .\sfidsmultiuserTests\bin\Release\; Get-ChildItem -Filter s*r.dll | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
+    
+    - name: Test
+      run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
       
-    #- name: Prepare ZIP Archive
-    #  uses: Amadevus/pwsh-script@v2.0.3
-    #  with:
-    #    script: '$releasenumber = $(${env:GitBuildVersionSimple} + ".0"); Compress-Archive -Path .\testconsole\bin\Release\*.exe -DestinationPath $("Refresh.v" + $releasenumber + ".zip"); Compress-Archive -Path .\testconsole\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update; Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;'
-    #  continue-on-error: true
-    #- run: ls *.zip
-    #- run: gh release create  $("Refresh.v" + ${env:GitBuildVersionSimple} + ".0") ./$("Refresh.v" + ${env:GitBuildVersionSimple} + ".0").zip
+    - name: Prepare ZIP Archive
+      uses: Amadevus/pwsh-script@v2.0.3
+      with:
+        script: '$releasenumber = $(${env:GitBuildVersionSimple} + ".0"); Compress-Archive -Path .\testconsole\bin\Release\*.exe -DestinationPath $("Refresh.v" + $releasenumber + ".zip"); Compress-Archive -Path .\testconsole\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update; Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;'
+      continue-on-error: true
+    - run: ls *.zip
+    - run: gh release create  $("Refresh.v" + ${env:GitBuildVersionSimple} + ".0") ./$("Refresh.v" + ${env:GitBuildVersionSimple} + ".0").zip
