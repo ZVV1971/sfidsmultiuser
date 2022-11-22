@@ -31,8 +31,8 @@ jobs:
     - name: Setup NuGet
       uses: NuGet/setup-nuget@v1.0.5
 
-    - name: Restore NuGet packages
-      run: nuget restore
+    #- name: Restore NuGet packages
+    #  run: nuget restore
 
     - name: Install additional NuGet packages
       run: dotnet tool install -g nbgv; nbgv install; nbgv get-version -v AssemblyVersion
@@ -46,7 +46,7 @@ jobs:
       run: dotnet restore
 
     - name: Build
-      run: dotnet build --no-restore --configuration Release
+      run: dotnet build --configuration Release
 
     - name: Check Versions
       run: cd .\testconsole\bin\Release\; Get-ChildItem -Filter A*.exe | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}; cd ..; cd ..; cd.. ; cd .\sfidsmultiuserTests\bin\Release\; Get-ChildItem -Filter s*r.dll | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
