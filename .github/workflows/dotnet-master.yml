@@ -39,7 +39,8 @@ jobs:
 
     - name: Prepare ZIP Archive
       run: cd .\sfidsmultiuser\bin\Release\; Get-ChildItem -Filter *.dll | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
-
+    - name: Prepare ZIP Archive2
+      run: cd .\testconsole\bin\Release\; Get-ChildItem -Filter A*.exe | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
     #- name: Test
     #  run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
       
