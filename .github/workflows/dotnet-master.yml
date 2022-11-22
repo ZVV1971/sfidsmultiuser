@@ -50,8 +50,6 @@ jobs:
 
     - name: Test
       run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
-
-      run: dotnet test --no-build --verbosity normal
       
     - name: Prepare ZIP Archive
       uses: Amadevus/pwsh-script@v2.0.3
