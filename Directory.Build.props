@@ -6,4 +6,16 @@
       <Version>3.5.119</Version>
     </PackageReference>
   </ItemGroup>
+  
+  <!-- target to modify Master and release build Versions to NOT Have semi-random source revision suffix as 4th part of version, rather use 0 
+	Condition of this task means it is only called for master anbd release (where the info version is appended to version) we don't want this behaviour -->
+	<Target Name="AppendZeroToReleaseVersion" BeforeTargets="GenerateAssemblyVersionInfo" DependsOnTargets="GetBuildVersion">
+		<CreateProperty Value="$(BuildVersion3Components).0$(PrereleaseVersion)$(SemVerBuildSuffix)">
+			<Output TaskParameter="Value" PropertyName="AssemblyInformationalVersion" />
+		</CreateProperty>
+		<CreateProperty Value="$(BuildVersion3Components).0">
+			<Output TaskParameter="Value" PropertyName="AssemblyFileVersion" />
+		</CreateProperty>
+	</Target>
+  
 </Project>
