@@ -51,8 +51,8 @@ jobs:
     #- name: Check Versions
     #  run: cd .\testconsole\bin\Release\; Get-ChildItem -Filter A*.exe | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}; cd ..; cd ..; cd.. ; cd .\sfidsmultiuserTests\bin\Release\; Get-ChildItem -Filter s*r.dll | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
     
-    - name: Test
-      run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
+    #- name: Test
+    #  run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
       
     - name: Prepare ZIP Archive
       uses: Amadevus/pwsh-script@v2.0.3
