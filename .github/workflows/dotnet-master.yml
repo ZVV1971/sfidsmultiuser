@@ -49,7 +49,7 @@ jobs:
       run: dotnet build --no-restore --configuration Release
 
     - name: Check Versions
-      run cd .\sfidsmultiuserTests\bin\Release\; Get-ChildItem -Filter A*.exe | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}; cd .\sfidsmultiuser\bin\Release\; Get-ChildItem -Filter s*.dll | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
+      run: cd .\sfidsmultiuserTests\bin\Release\; Get-ChildItem -Filter A*.exe | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}; cd .\sfidsmultiuser\bin\Release\; Get-ChildItem -Filter s*.dll | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
     #- name: Test
     #  run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
       
