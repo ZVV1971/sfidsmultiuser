@@ -25,25 +25,34 @@ jobs:
       with:
         fetch-depth: '0'
 
-    - name: Setup MSBuild path
-      uses: microsoft/setup-msbuild@v1.0.2
+    #- name: Setup MSBuild path
+    #  uses: microsoft/setup-msbuild@v1.0.2
 
-    - name: Setup NuGet
-      uses: NuGet/setup-nuget@v1.0.5
+    #- name: Setup NuGet
+    #  uses: NuGet/setup-nuget@v1.0.5
 
     - name: Restore NuGet packages
-      run: nuget restore
+      run: |
+        nuget restore
+        nuget restore .\testconsole\packages.config -PackagesDirectory .\packages
+        nuget restore .\sfidsmultiuserTests\packages.config -PackagesDirectory .\packages
 
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v1
-      with:
-        dotnet-version: 6.0.x
+    #- name: Setup .NET
+    #  uses: actions/setup-dotnet@v1
+    #  with:
+    #    dotnet-version: 5.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore
 
     - name: Build
       run: dotnet build --configuration Release
 
-    - name: Test
-      run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
+    #- name: Check Versions
+    #  run: cd .\testconsole\bin\Release\; Get-ChildItem -Filter A*.exe | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}; cd ..; cd ..; cd.. ; cd .\sfidsmultiuserTests\bin\Release\; Get-ChildItem -Filter s*r.dll | % {[System.Diagnostics.FileVersionInfo]::GetVersionInfo($_.FullName)}
+    
+    #- name: Test
+    #  run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
       
     - name: Prepare ZIP Archive
       uses: Amadevus/pwsh-script@v2.0.3
