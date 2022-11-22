@@ -452,7 +452,7 @@ namespace MinSizeQueueTests
         [TestInitialize]
         public void InitializeFiles()
         {
-            path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup_syncho.csv";
+            path = Environment.GetFolderPath(Environment.SpecialFolder.Personal) + @"\backup_syncho.csv";
             testString = RndString.GetRandomString(4000);
             numberOfRows = 10000;
             minSizeQueue = new MinSizeQueue<string>(1);
@@ -464,6 +464,15 @@ namespace MinSizeQueueTests
                 {
                     stream.WriteLine(testString);
                 }
+            }
+        }
+
+        [TestCleanup]
+        public void CleanUp()
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
             }
         }
 
