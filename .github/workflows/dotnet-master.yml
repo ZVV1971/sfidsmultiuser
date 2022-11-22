@@ -3,15 +3,16 @@
 
 name: .NET
 
-env:
-  VERSION_NUMBER : ''
-
 on:
   push:
     branches:
       - "master"
+      - "release/**"
   pull_request:
   workflow_dispatch:
+
+env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   build:
@@ -34,7 +35,7 @@ jobs:
       run: nuget restore
 
     - name: Install additional NuGet packages
-      run: dotnet tool install -g nbgv; nbgv install; $VERSION_NUMBER = 'nbgv get-version -v AssemblyVersion'
+      run: dotnet tool install -g nbgv; nbgv install; nbgv get-version -v AssemblyVersion
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v1
@@ -49,9 +50,11 @@ jobs:
 
     - name: Test
       run: dotnet test --no-build --verbosity normal
-
-    - name: 'Upload Artifacts'
-      uses: actions/upload-artifact@v3
+      
+    - name: Prepare ZIP Archive
+      uses: Amadevus/pwsh-script@v2.0.3
       with:
-        name: my-artifact
-        path: ~/download/path
+        script: '$releasenumber = $(${env:GitBuildVersionSimple} + ".0"); Compress-Archive -Path .\testconsole\bin\Release\*.exe -DestinationPath $("Refresh.v" + $releasenumber + ".zip"); Compress-Archive -Path .\testconsole\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update; Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;'
+      continue-on-error: true
+    - run: ls *.zip
+    - run: gh release create  $("Refresh.v" + ${env:GitBuildVersionSimple} + ".0") ./$("Refresh.v" + ${env:GitBuildVersionSimple} + ".0").zip
