@@ -28,7 +28,8 @@ jobs:
     - name: Setup MSBuild path
       uses: microsoft/setup-msbuild@v1.0.2
 
-
+    - name: Restore NuGet packages
+      run: nuget restore
         
     - name: Check version
       run: nbgv get-version
