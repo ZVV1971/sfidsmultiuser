@@ -49,6 +49,8 @@ jobs:
       run: dotnet build --no-restore --configuration Release
 
     - name: Test
+      run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
+
       run: dotnet test --no-build --verbosity normal
       
     - name: Prepare ZIP Archive

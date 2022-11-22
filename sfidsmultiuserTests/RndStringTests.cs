@@ -6,6 +6,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -44,6 +46,9 @@ namespace RepresentativeSubset.Tests
     [TestClass]
     public class ReprSubTests
     {
+        private int milisecsForLargeShuffle = 80000;
+        private int milisecsForLargeQuartering = 2000;
+
         [TestMethod("Test the outlayers of range of the percentange")]
         public void SetWrongPercentageReprSubset()
         {
@@ -98,7 +103,7 @@ namespace RepresentativeSubset.Tests
             
             watch.Stop();
 
-            Assert.IsTrue(watch.ElapsedMilliseconds <= 100, "The execution took {0} miliseconds", watch.ElapsedMilliseconds);
+            Assert.IsTrue(watch.ElapsedMilliseconds <= milisecsForLargeQuartering, "The execution took {0} miliseconds, but we expected {1}", watch.ElapsedMilliseconds, milisecsForLargeQuartering);
         }
 
         [TestMethod("Measure execution time for Shuffling for a comparatively big array ~13.000.000")]
@@ -114,7 +119,7 @@ namespace RepresentativeSubset.Tests
 
             watch.Stop();
 
-            Assert.IsTrue(watch.ElapsedMilliseconds <= 100, "The execution took {0} miliseconds", watch.ElapsedMilliseconds);
+            Assert.IsTrue(watch.ElapsedMilliseconds <= milisecsForLargeShuffle, "The execution took {0} miliseconds, but {1} was expected", watch.ElapsedMilliseconds, milisecsForLargeShuffle);
         }
 
         [TestMethod("Check number of returned records for a comparatively big array ~1.000.000")]
@@ -168,16 +173,50 @@ namespace MultiPartStreamTests
         int numberOfParts;
         int numberOfLines;
         int numberOfThreads;
+        int numberOfTries = 10;
+        TimeSpan timeIntervalBetweenTries = TimeSpan.FromMilliseconds(1000);
 
 
         [TestInitialize]
         public void Initialize()
         {
-            path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup.csv";
+            path = Environment.GetFolderPath(Environment.SpecialFolder.Personal) + @"\backup.csv";
             testString = RndString.GetRandomString(500);
-            numberOfParts = 40000;
-            numberOfLines = 5000;
+            numberOfParts = 40;
+            numberOfLines = 500;
             numberOfThreads = 8;
+        }
+
+        [TestCleanup]
+        public void Cleanup()
+        {
+            if (File.Exists(path))
+            {
+                DirectoryInfo dir = new DirectoryInfo(Path.GetDirectoryName(path));
+
+                foreach (var file in dir.EnumerateFiles("backup.csv.part????"))
+                {
+                    var tries = 0;
+                    while (true)
+                    {
+                        try
+                        {
+                            File.Open(file.FullName, FileMode.Open, FileAccess.Write, FileShare.Delete);
+                            file.Delete();
+                            break;
+                        }
+                        catch (IOException e)
+                        {
+                            if (!IsFileLocked(e))
+                                throw;
+                            if (++tries > numberOfTries)
+                                throw new Exception("The file is locked too long: " + e.Message, e);
+                            Thread.Sleep(timeIntervalBetweenTries);
+                        }
+                    }
+                }
+                File.Delete(path);
+            }
         }
 
         [TestMethod("Checks whether the number of files is equal to the number of parts created by the method")]
@@ -253,7 +292,7 @@ namespace MultiPartStreamTests
                 Task.WaitAll(taskList.ToArray());
             }
 
-            Assert.AreEqual((int)(numberOfParts / numberOfLines) - 1, eventList.Count, $"Actual count is {eventList.Count} expected {(int)(numberOfParts / numberOfLines) - 1}");
+            Assert.AreEqual(Math.Ceiling(numberOfParts / (double)numberOfLines) - 1, eventList.Count, $"Actual count is {eventList.Count} expected {(int)Math.Ceiling(numberOfParts / (double)numberOfLines) - 1}");
         }
 
         [TestMethod("Checks if the system can correctly find all the parts created by the PartialStreamWriter")]
@@ -273,19 +312,25 @@ namespace MultiPartStreamTests
             };
             files.AddRange(Directory.GetFiles(Path.GetDirectoryName(path), Path.GetFileName(path) + ".part????"));
 
-            Assert.AreEqual(files.Count, (int)(numberOfParts / numberOfLines));
+            Assert.AreEqual(files.Count, Math.Ceiling(numberOfParts / (double)numberOfLines));
         }
 
         [TestMethod("Check correctnes when reading from multiple parts")]
         public void readFromMultipleParts()
         {
-            //using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
-            //{
-            //    for (int i = 0; i < numberOfParts; i++)
-            //    {
-            //        partialStream.WriteLine(i.ToString());
-            //    }
-            //}
+            if (!File.Exists(path))
+            {
+                using (PartialStreamWriter partialStream = new PartialStreamWriter(numberOfLines, path, false, Encoding.ASCII))
+                {
+                    for (int i = 0; i < numberOfParts; i++)
+                    {
+                        for (int j = 0; j < numberOfLines; j++)
+                        {
+                            partialStream.WriteLine(testString);
+                        }
+                    }
+                }
+            }
 
             MinSizeQueue<string> minSizeQueue = new MinSizeQueue<string>(numberOfThreads);
 
@@ -350,7 +395,7 @@ namespace MultiPartStreamTests
                         if (minSizeQueue.TryDequeue(out value))
                         {
                             Console.WriteLine(value);
-                            //Thread.Sleep(100);
+                            Thread.Sleep(10);
                         }
                         else
                         {
@@ -363,7 +408,7 @@ namespace MultiPartStreamTests
 
             deq.Add(enq);
             Task.WaitAll(deq.ToArray<Task>());
-            Assert.AreEqual(eventList.Count, numberOfParts);
+            Assert.AreEqual(eventList.Count, numberOfParts*numberOfLines);
         }
 
         private void runTask(object state)
@@ -384,6 +429,12 @@ namespace MultiPartStreamTests
                 }
             }
         }
+
+        private static bool IsFileLocked(IOException exception)
+        {
+            int errorCode = Marshal.GetHRForException(exception) & ((1 << 16) - 1);
+            return errorCode == 32 || errorCode == 33;
+        }
     }
 }
 
@@ -401,7 +452,7 @@ namespace MinSizeQueueTests
         [TestInitialize]
         public void InitializeFiles()
         {
-            path = @"C:\Users\Uladzimir_Zakharenka\Documents\backup_syncho.csv";
+            path = Environment.GetFolderPath(Environment.SpecialFolder.Personal) + @"\backup_syncho.csv";
             testString = RndString.GetRandomString(4000);
             numberOfRows = 10000;
             minSizeQueue = new MinSizeQueue<string>(1);
@@ -413,6 +464,15 @@ namespace MinSizeQueueTests
                 {
                     stream.WriteLine(testString);
                 }
+            }
+        }
+
+        [TestCleanup]
+        public void CleanUp()
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
             }
         }
 
@@ -483,8 +543,9 @@ namespace JsonNotInTests
     [TestClass]
     public class json_notin
     {
-        string path_to_account_fields = "C:\\Users\\Uladzimir_Zakharenka\\source\\repos\\ZVV1971\\sfidsmultiuser\\testconsole\\Account_fields.json";
-        string path_to_objects = "C:\\Users\\Uladzimir_Zakharenka\\source\\repos\\ZVV1971\\sfidsmultiuser\\testconsole\\ObjectsToExclude.json";
+        public static string solution_dir = Directory.GetParent(Directory.GetParent(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)).FullName).FullName;
+        string path_to_account_fields = Path.Combine(solution_dir, "Account_fields.json");
+        string path_to_objects = Path.Combine(solution_dir, "ObjectsToExclude.json");
         JArray JFields;
         JArray JObjects;
 
@@ -498,13 +559,13 @@ namespace JsonNotInTests
         [TestMethod]
         public void CheckNumberOfFields()
         {
-            Assert.AreEqual(JFields.Count, 478);
+            Assert.AreEqual(JFields.Count, 62);
         }
 
         [TestMethod]
         public void CheckNumberofFieldsBeforeExclusion()
         {
-            Assert.AreEqual(249,
+            Assert.AreEqual(34,
                 JFields.Where(t => t["updateable"].ToString().Equals("True")
                                         && !t["type"].ToString().Equals("boolean")
                                         && !t["type"].ToString().Equals("picklist")
@@ -520,7 +581,7 @@ namespace JsonNotInTests
         {
             var an = JObjects.Descendants().OfType<JProperty>().Where(p => p.Name == "AnyObject" || p.Name == "Account");
 
-            Assert.AreEqual(12,
+            Assert.AreEqual(2,
                 an.Count()
                 );
         }
@@ -538,7 +599,7 @@ namespace JsonNotInTests
                                 //Include all the references
                                 .Concat(JFields.Where(x => x["type"].ToString().Equals("reference")));
             var cn = bn.Where(d => !an.Contains(d["name"])).Select(s=> new { name = s["name"], type = s["type"] });
-            Assert.AreEqual(242,
+            Assert.AreEqual(32,
                                 bn.Where(x => !an.Contains(x["name"]))
                                 .Count()
                 );

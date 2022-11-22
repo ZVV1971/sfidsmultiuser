@@ -1,0 +1,14 @@
+{
+	"ObjectsToExclude": [
+		"Attachment",
+		"Document"
+	],
+	"FieldsToExclude": [
+		{
+			"Account": "Jigsaw"
+		},
+		{
+			"AnyObject": "Sic"
+		}
+	]
+}

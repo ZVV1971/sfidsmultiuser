@@ -386,7 +386,7 @@ namespace AsyncSalesForceAttachments
         public void Dispose()
         {
             Dispose(disposing: true);
-            GC.SuppressFinalize(this);
+            //GC.SuppressFinalize(this);
         }
 
         public delegate void NewPartEventHandler(object sender, NewPartStartedEventArgs e);
