@@ -32,7 +32,7 @@ jobs:
       run: nuget restore
         
     - name: Check version
-      run: nbgv get-version
+      run: nbgv install; nbgv get-version
 
     - name: Build
       run: dotnet build --configuration Release
