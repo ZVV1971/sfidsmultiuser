@@ -1,11 +1,10 @@
-name: .NET
+name: .NET workflow for bugs and features
 
 on:
   push:
     branches:
       - "bug/**"
       - "feature/**"
-  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -19,28 +18,17 @@ jobs:
       with:
         fetch-depth: '0'
 
-    - name: Setup MSBuild path
-      uses: microsoft/setup-msbuild@v1.0.2
-
-    - name: Setup NuGet
-      uses: NuGet/setup-nuget@v1.0.5
-
     - name: Restore NuGet packages
-      run: nuget restore
-
-    - name: Install additional NuGet packages
-      run: dotnet tool install -g nbgv; nbgv install; nbgv get-version -v AssemblyVersion
-
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v1
-      with:
-        dotnet-version: 5.0.x
+      run: |
+        nuget restore
+        nuget restore .\testconsole\packages.config -PackagesDirectory .\packages
+        nuget restore .\sfidsmultiuserTests\packages.config -PackagesDirectory .\packages
 
     - name: Restore dependencies
       run: dotnet restore
 
     - name: Build
-      run: dotnet build --no-restore --configuration Release
+      run: dotnet build --configuration Release
 
-    - name: Test
+    - name: Run Tests
       run: cd sfidsmultiuserTests/bin/Release; dotnet vstest sfidsmultiuserTests.dll
