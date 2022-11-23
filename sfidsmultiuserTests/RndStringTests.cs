@@ -194,7 +194,7 @@ namespace MultiPartStreamTests
             {
                 DirectoryInfo dir = new DirectoryInfo(Path.GetDirectoryName(path));
 
-                foreach (var file in dir.EnumerateFiles("backup.csv.part????"))
+                foreach (var file in dir.EnumerateFiles("backup.csv.part????").Append(new FileInfo(path)))
                 {
                     var tries = 0;
                     while (true)
@@ -215,7 +215,6 @@ namespace MultiPartStreamTests
                         }
                     }
                 }
-                File.Delete(path);
             }
         }
 
