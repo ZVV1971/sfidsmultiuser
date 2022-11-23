@@ -581,7 +581,7 @@ namespace JsonNotInTests
         {
             var an = JObjects.Descendants().OfType<JProperty>().Where(p => p.Name == "AnyObject" || p.Name == "Account");
 
-            Assert.AreEqual(2,
+            Assert.AreEqual(12,
                 an.Count()
                 );
         }
@@ -599,7 +599,7 @@ namespace JsonNotInTests
                                 //Include all the references
                                 .Concat(JFields.Where(x => x["type"].ToString().Equals("reference")));
             var cn = bn.Where(d => !an.Contains(d["name"])).Select(s=> new { name = s["name"], type = s["type"] });
-            Assert.AreEqual(32,
+            Assert.AreEqual(26,
                                 bn.Where(x => !an.Contains(x["name"]))
                                 .Count()
                 );
