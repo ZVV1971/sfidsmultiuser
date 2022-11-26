@@ -540,7 +540,7 @@ namespace MinSizeQueueTests
 namespace JsonNotInTests
 {
     [TestClass]
-    public class json_notin
+    public class JSON_Not_IN_Tests
     {
         public static string solution_dir = Directory.GetParent(Directory.GetParent(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)).FullName).FullName;
         string path_to_account_fields = Path.Combine(solution_dir, "Account_fields.json");

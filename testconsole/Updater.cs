@@ -67,13 +67,17 @@ namespace AutoUpdate
 				Uri u;
 				while (null != (line = sr.ReadLine()))
 				{
-					var match = urlMatcher.Match(line);
+					Match match = urlMatcher.Match(line);
 					if (match.Success)
 					{
-						var uri = new Uri(string.Concat("https://github.com", GitHubRepo, "/releases/download/", match.Value, "/", match.Value, ".zip"));
-						var sa = match.Value.Substring(9).Split('.','/');
-						var v = new Version(int.Parse(sa[0]), int.Parse(sa[1]), int.Parse(sa[2]), int.Parse(sa[3]));
-						if(!result.TryGetValue(v, out u)) result.Add(v, uri);
+						Uri uri = new Uri(string.Concat("https://github.com", GitHubRepo, "/releases/download/", match.Value, "/", match.Value, ".zip"));
+						String[] sa = match.Value.Substring(9).Split('.','/');
+						Version v = new Version(int.Parse(sa[0]), int.Parse(sa[1]), int.Parse(sa[2]), int.Parse(sa[3]));
+						if (!result.TryGetValue(v, out u))
+						{ 
+							result.Add(v, uri);
+							break; //One value is usually enough since it is in the most cases the looked-for one
+						}
 					}
 				}
 			}
@@ -81,7 +85,7 @@ namespace AutoUpdate
 		}
 		public static bool HasUpdate {
 			get {
-				var v = Assembly.GetEntryAssembly().GetName().Version;
+				Version v = Assembly.GetEntryAssembly().GetName().Version;
 				foreach(var e in _VersionUrls)
 					if(e.Key>v)
 						return true;
