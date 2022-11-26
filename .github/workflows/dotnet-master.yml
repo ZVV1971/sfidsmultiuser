@@ -56,7 +56,23 @@ jobs:
     - name: Prepare ZIP Archive
       uses: Amadevus/pwsh-script@v2.0.3
       with:
-        script: '$releasenumber = $(${env:GitBuildVersionSimple} + ".0"); Compress-Archive -Path .\testconsole\bin\Release\*.exe -DestinationPath $("Refresh.v" + $releasenumber + ".zip"); Compress-Archive -Path .\testconsole\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update; Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;'
+        script: |
+          # Get the TITLE of the latest release
+          $last_release = gh release list --limit 1; 
+          
+          # Calculate the version number of the current release
+          $releasenumber = $(${env:GitBuildVersionSimple} + ".0");
+          
+          # Compare the versions of the current release with the version of the lastest one
+          # and increment the revision number
+          if ($releasenumber -eq $last_release.Split()[0].Split("v")[1]) {
+            $releasenumber = $(${env:GitBuildVersionSimple} + ([int]($last_release.Split()[0].Split("v")[1].Split(".")[3]) + 1).ToString());
+          }; 
+          
+          # Make the Zipped version of the release
+          Compress-Archive -Path .\testconsole\bin\Release\*.exe -DestinationPath $("Refresh.v" + $releasenumber + ".zip"); 
+          Compress-Archive -Path .\testconsole\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update; 
+          Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;
       continue-on-error: true
     - run: ls *.zip
     - run: gh release create  $("Refresh.v" + ${env:GitBuildVersionSimple} + ".0") ./$("Refresh.v" + ${env:GitBuildVersionSimple} + ".0").zip
