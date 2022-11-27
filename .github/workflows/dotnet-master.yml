@@ -76,6 +76,5 @@ jobs:
           Compress-Archive -Path .\sfidsmultiuser\bin\Release\*.dll -DestinationPath $("Refresh.v" + $releasenumber + ".zip") -Update;
           
           # Post release
-          $latestcommit = git log -1 --pretty=%H;
-          gh release create  $releasenumber --target $latestcommit "./$($releasenumber).zip" ;
+          gh release create  $releasenumber "./Refresh.v$($releasenumber).zip" ;
       continue-on-error: true
